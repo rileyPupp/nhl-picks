@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NHL Picks</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <section id="auth" class="auth" hidden>
+    <h1>NHL Picks</h1>
+    <p class="muted">Pick every winner, call the points, climb the leaderboard.</p>
+    <form id="authForm" class="card">
+      <label>Name <input id="authName" autocomplete="username" maxlength="20" required></label>
+      <label>PIN <input id="authPin" type="password" inputmode="numeric" autocomplete="current-password" maxlength="6" required></label>
+      <div id="authMsg" class="msg bad" hidden></div>
+      <div class="auth-actions">
+        <button type="submit" class="primary" data-mode="login">Sign in</button>
+        <button type="submit" data-mode="register">Create account</button>
+      </div>
+      <p class="muted small">New here? Choose a name and a 4–6 digit PIN, then press Create account.</p>
+    </form>
+  </section>
+
+  <div id="app" hidden>
+    <header>
+      <h1>NHL Picks</h1>
+      <div id="totals"></div>
+      <div class="who"><span id="whoName"></span> <button id="logout">Sign out</button></div>
+    </header>
+
+    <nav class="tabs" role="tablist">
+      <button role="tab" data-tab="games">Games</button>
+      <button role="tab" data-tab="players">Player points</button>
+      <button role="tab" data-tab="board">Leaderboard</button>
+    </nav>
+
+    <nav class="daybar" id="daybar">
+      <button id="prev" aria-label="Previous day">&lsaquo;</button>
+      <div class="dayinfo">
+        <div id="dateLabel"></div>
+        <input type="date" id="dateInput" aria-label="Choose date">
+      </div>
+      <button id="next" aria-label="Next day">&rsaquo;</button>
+      <button id="today">Today</button>
+    </nav>
+
+    <main>
+      <div id="msg" class="msg" hidden></div>
+
+      <section data-panel="games">
+        <div id="games" class="grid"></div>
+      </section>
+
+      <section data-panel="players" hidden>
+        <p class="muted small">Three skaters a night, the same three for everyone: one star, one middle-of-the-lineup player, one depth player.
+          Call how many points each gets. <b>1 pt</b> for calling point / no point right, <b>+2</b> for the exact number (3+ counts as 3).
+          A player who doesn't dress doesn't count.</p>
+        <div id="players" class="grid"></div>
+      </section>
+
+      <section data-panel="board" hidden>
+        <p class="muted small"><b>Pick %</b> = points you earned ÷ points you could have earned, on the nights you played.
+          Once you make any pick on a night, every finished game (and every drawn skater who played) counts, so skipping hard games doesn't help.
+          Nights you sit out don't count against you. <span id="minNights"></span></p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>#</th><th>Player</th><th>Pick %</th><th>Games %</th><th>Players %</th><th>Nights</th><th>Pts</th><th>Winners</th><th>Exact</th></tr></thead>
+            <tbody id="board"></tbody>
+          </table>
+        </div>
+        <h2>Your nights</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Date</th><th>Pick %</th><th>Games</th><th>Winners</th><th>Exact</th><th>Players</th></tr></thead>
+            <tbody id="nights"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
