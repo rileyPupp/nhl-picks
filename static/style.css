@@ -142,6 +142,9 @@ tr.cut td { border-bottom: 2px dashed var(--muted); }
 .order-row.hit { background: color-mix(in srgb, var(--good) 14%, transparent); }
 .order-row.miss { background: color-mix(in srgb, var(--bad) 10%, transparent); }
 .order-no { width: 22px; color: var(--muted); font-weight: 700; }
+.grip { cursor: grab; touch-action: none; user-select: none; color: var(--muted); font-size: 16px; line-height: 1; padding: 4px 6px 4px 0; letter-spacing: -3px; }
+.order-row.is-dragged { opacity: .45; background: color-mix(in srgb, var(--accent) 12%, transparent); }
+body.dragging-order { cursor: grabbing; user-select: none; }
 .order-row .tcell { flex: 1; min-width: 0; }
 .order-row .move { display: flex; gap: 4px; }
 .order-row .move button { padding: 4px 8px; font-size: 12px; }
@@ -151,6 +154,7 @@ tr.cut td { border-bottom: 2px dashed var(--muted); }
 .everyone summary { cursor: pointer; color: var(--muted); }
 .everyone ul { margin: 6px 0 0; padding-left: 18px; font-size: 14px; }
 #standingsTable h2 { margin-top: 20px; }
+#teamsGrid h3.sub { font-size: 14px; color: var(--muted); margin: 14px 0 8px; font-weight: 600; }
 
 /* teams, players, news */
 .team-card { display: flex; flex-direction: column; align-items: center; gap: 4px; width: 100%; text-align: center; padding: 14px 10px; cursor: pointer; }

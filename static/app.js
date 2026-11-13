@@ -506,6 +506,7 @@ let standingsGroup = GROUPS.includes(store.get("standingsGroup")) ? store.get("s
 let standingsKey = null; // null = the period whose picks are still open
 let standingsData = null;
 let orderDrafts = {}; // division abbrev -> team codes in the order being edited
+let drag = null;      // {abbrev, team} while a row is being dragged
 
 const dayText = (ds) => {
   const [y, m, d] = ds.split("-").map(Number);
@@ -547,7 +548,9 @@ function divisionCard(div, p) {
     const dirty = !saved || !sameOrder(draft, saved);
     const rows = draft.map((team, i) => {
       const t = byTeam[team];
-      return `<li class="order-row">
+      const dragged = drag && drag.team === team && drag.abbrev === div.abbrev;
+      return `<li class="order-row${dragged ? " is-dragged" : ""}">
+          <span class="grip" data-grip data-division="${esc(div.abbrev)}" data-team="${esc(team)}" title="Drag to reorder" aria-label="Drag to reorder">⋮⋮</span>
           <span class="order-no">${i + 1}</span>
           <span class="tcell">${teamLogo(t)}<span>${esc(t.name)}</span></span>
           <span class="move">
@@ -557,7 +560,7 @@ function divisionCard(div, p) {
         </li>`;
     }).join("");
     return `
-      <article class="card div-card">
+      <article class="card div-card" data-card="${esc(div.abbrev)}">
         <div class="card-head"><b>${esc(div.name)}</b> · ${esc(div.conference)}</div>
         <div class="order-status small">${saved ? (dirty ? `<span class="muted">Unsaved changes</span>` : `Saved`) : `<span class="muted">Not saved yet</span>`}</div>
         <ol class="order-list">${rows}</ol>
@@ -677,6 +680,46 @@ async function saveOrder(division, teams) {
   loadStandings(); // redraw from what the server holds
 }
 
+// Drag a row by its grip (mouse or touch). Each move re-slots the dragged team among the others.
+$("#standings").addEventListener("pointerdown", (e) => {
+  const grip = e.target.closest("[data-grip]");
+  if (!grip || e.button > 0) return;
+  e.preventDefault();
+  drag = { abbrev: grip.dataset.division, team: grip.dataset.team };
+  document.body.classList.add("dragging-order");
+  renderPicks();
+  window.addEventListener("pointermove", onDragMove);
+  window.addEventListener("pointerup", onDragEnd);
+  window.addEventListener("pointercancel", onDragEnd);
+});
+
+function onDragMove(e) {
+  if (!drag) return;
+  const card = document.querySelector(`[data-card="${drag.abbrev}"]`);
+  if (!card) return;
+  const others = [...card.querySelectorAll(".order-row:not(.is-dragged)")];
+  const above = others.filter((row) => {
+    const b = row.getBoundingClientRect();
+    return b.top + b.height / 2 < e.clientY;
+  }).length;
+  const draft = orderDrafts[drag.abbrev];
+  const next = draft.filter((t) => t !== drag.team);
+  next.splice(above, 0, drag.team);
+  if (!sameOrder(next, draft)) {
+    orderDrafts[drag.abbrev] = next;
+    renderPicks();
+  }
+}
+
+function onDragEnd() {
+  window.removeEventListener("pointermove", onDragMove);
+  window.removeEventListener("pointerup", onDragEnd);
+  window.removeEventListener("pointercancel", onDragEnd);
+  drag = null;
+  document.body.classList.remove("dragging-order");
+  renderPicks();
+}
+
 $("#standings").addEventListener("click", (e) => {
   const move = e.target.closest("[data-move]");
   if (move) {
@@ -769,12 +812,42 @@ async function loadTeams() {
   $("#teamsGrid").innerHTML = `<p class="empty">Loading…</p>`;
   try {
     const teams = sortTeams(await ensureTeams(), teamSort);
-    $("#teamsGrid").innerHTML = teams.map((t) => `
+    const card = (t) => `
       <button class="card team-card" data-team-code="${esc(t.team)}">
         ${teamLogo(t)}
         <span class="tc-name">${esc(t.name)}</span>
         <span class="muted small">${esc(t.divisionName)} · #${t.divisionRank} · ${t.pts} pts</span>
-      </button>`).join("");
+      </button>`;
+    // Conference and division sorts get a heading per group; the cards keep their sorted order inside.
+    if (teamSort === "conference") {
+      // Conference heading, then a sub-heading and grid for each division in it.
+      const conferences = [];
+      for (const t of teams) {
+        let c = conferences.find((x) => x.key === t.conferenceName);
+        if (!c) conferences.push((c = { key: t.conferenceName, divisions: [] }));
+        let d = c.divisions.find((x) => x.key === t.divisionName);
+        if (!d) c.divisions.push((d = { key: t.divisionName, teams: [] }));
+        d.teams.push(t);
+      }
+      $("#teamsGrid").innerHTML = conferences.map((c) =>
+        `<h2>${esc(c.key)}</h2>` + c.divisions.map((d) =>
+          `<h3 class="sub">${esc(d.key)}</h3><div class="grid">${d.teams.map(card).join("")}</div>`).join("")).join("");
+      return;
+    }
+    const groupKey = { division: (t) => `${t.divisionName} · ${t.conferenceName}` }[teamSort];
+    if (!groupKey) {
+      $("#teamsGrid").innerHTML = `<div class="grid">${teams.map(card).join("")}</div>`;
+      return;
+    }
+    const groups = [];
+    for (const t of teams) {
+      const key = groupKey(t);
+      const last = groups[groups.length - 1];
+      if (last && last.key === key) last.teams.push(t);
+      else groups.push({ key, teams: [t] });
+    }
+    $("#teamsGrid").innerHTML = groups.map((g) =>
+      `<h2>${esc(g.key)}</h2><div class="grid">${g.teams.map(card).join("")}</div>`).join("");
   } catch (e) {
     $("#teamsGrid").innerHTML = `<p class="empty">Couldn't load teams: ${esc(e.message)}</p>`;
   }
