@@ -24,12 +24,12 @@ Make a league from the Leaderboard tab and share its invite link (or 6-letter co
 - Tap your name at the top to change how it shows on leaderboards.
 
 ## Run it locally
-Double-click `start.bat` (or run `python server.py`), then open http://localhost:8000. Locally it needs Python 3 only: data goes in `nhl-picks.db` (SQLite) in this folder, which is never committed.
+Double-click `start.bat` (or run `python server.py`), then open http://localhost:8000. Locally it needs Python 3 only: data goes in `nhl-picks.db` (SQLite) in this folder, which is never committed. A local run always uses this file, even though `.env.local` holds the Neon strings, so you can't touch the live data by accident. To run locally against Neon on purpose, set `USE_NEON=1` first (`set USE_NEON=1` in cmd, `$env:USE_NEON=1` in PowerShell). The server prints which database it's using when it starts.
 
 ## Put it online (Render + Neon, free)
 The web app runs on [Render](https://render.com), the database on [Neon](https://neon.tech) (Render's own free Postgres is deleted after 30 days; Neon's isn't). Render's free plan sleeps after 15 idle minutes, so the first visit after that takes about a minute.
 
-1. **Database.** This folder is linked to the Neon project `nhl-picks` (see `.neon` and `neon.ts`). `neon deploy` (or `neon env pull`) writes its connection strings into `.env.local`, which is gitignored. The app reads `.env.local` on start, so locally it now uses Neon instead of the SQLite file — that is the live database. Two strings:
+1. **Database.** This folder is linked to the Neon project `nhl-picks` (see `.neon` and `neon.ts`). `neon deploy` (or `neon env pull`) writes its connection strings into `.env.local`, which is gitignored. The app reads `.env.local` on start but ignores these two strings unless `USE_NEON=1` is set, so local runs stay on SQLite (`copy_to_postgres.py` sets it for you). Two strings:
    - `DATABASE_URL` (pooled, host has `-pooler`): used for the app's queries.
    - `DATABASE_URL_UNPOOLED` (direct): used for creating tables and for `copy_to_postgres.py`.
 2. **Copy your current data** (optional, once, before anyone signs up on the site):
@@ -47,7 +47,8 @@ To try Google/GitHub sign-in on your own computer, make a second OAuth app with 
 ### All settings
 | Variable | What it does |
 |---|---|
-| `DATABASE_URL` | Postgres connection string (pooled on Neon). Unset = local SQLite file. Also read from `.env.local` / `.env`. |
+| `DATABASE_URL` | Postgres connection string (pooled on Neon). Unset = local SQLite file. Read from `.env.local` / `.env` only when `USE_NEON=1`. |
+| `USE_NEON` | `1` = use the Neon strings from `.env.local` / `.env` when running locally. Not needed on Render, where `DATABASE_URL` is a real setting. |
 | `DATABASE_URL_UNPOOLED` | Direct Postgres connection for creating tables and bulk copies. Falls back to `DATABASE_URL`. |
 | `PUBLIC_URL` | The site's address, used for sign-in callbacks. Default `http://localhost:<PORT>`. |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Turn on Google sign-in. |

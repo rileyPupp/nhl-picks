@@ -7,10 +7,12 @@ It reads DATABASE_URL (and DATABASE_URL_UNPOOLED) from the environment or from
 .env.local, which `neon deploy` writes. Run it once, before anyone signs up on the
 website. Sessions are not copied, so everyone signs in again on the site.
 """
+import os
 import sqlite3
 import sys
 
-import db  # loads .env.local, picks Postgres when DATABASE_URL is set
+os.environ.setdefault("USE_NEON", "1")  # let db read the Neon strings from .env.local
+import db  # noqa: E402  loads .env.local, picks Postgres when DATABASE_URL is set
 
 if not db.IS_POSTGRES:
     sys.exit("Set DATABASE_URL (or run `neon deploy` to write .env.local) first.")

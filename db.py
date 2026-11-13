@@ -1,5 +1,8 @@
 """Database layer: PostgreSQL when DATABASE_URL is set (hosted), else a local SQLite file.
 
+Locally the app uses the SQLite file even though `neon deploy` writes the Neon connection
+strings into .env.local. Set USE_NEON=1 to use them (e.g. `copy_to_postgres.py` does).
+
 Queries use ? placeholders and SQL that both databases accept
 (ON CONFLICT upserts, RETURNING, lower(name) indexes).
 """
@@ -11,11 +14,17 @@ from contextlib import contextmanager
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
+DB_KEYS = ("DATABASE_URL", "DATABASE_URL_UNPOOLED")
+
+
 def _load_env_files():
     """Read KEY=VALUE lines from .env.local, then .env (written by `neon deploy` / `neon env pull`).
 
     Real environment variables win, so a host's settings (e.g. on Render) are never overridden.
+    The database strings in these files are skipped unless USE_NEON=1, so a local run
+    doesn't touch the live database.
     """
+    use_neon = os.environ.get("USE_NEON") == "1"
     for name in (".env.local", ".env"):
         path = os.path.join(BASE_DIR, name)
         if not os.path.exists(path):
@@ -29,6 +38,8 @@ def _load_env_files():
                 key, value = key.strip(), value.strip()
                 if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
                     value = value[1:-1]
+                if key in DB_KEYS and not use_neon:
+                    continue
                 os.environ.setdefault(key, value)
 
 
