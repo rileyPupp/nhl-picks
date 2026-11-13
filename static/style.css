@@ -68,7 +68,7 @@ h2 { font-size: 17px; margin: 24px 0 0; }
 .tabs button { border: none; border-bottom: 3px solid transparent; border-radius: 0; background: transparent; color: var(--muted); padding: 10px 12px; white-space: nowrap; }
 .tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
 
-.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr)); }
 
 /* player pick'em */
 .pinfo { display: flex; gap: 12px; align-items: center; }
@@ -118,3 +118,34 @@ button.link { border: none; background: none; color: var(--bad); padding: 0 4px;
 .link-banner p { margin: 0 0 10px; font-size: 14px; }
 .providers-row { display: flex; gap: 8px; flex-wrap: wrap; }
 .link-plain { border: none; background: none; padding: 4px; font-weight: 600; text-decoration: underline dotted; }
+
+/* phones */
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+button, .team, .provider-btn { touch-action: manipulation; }
+@media (hover: none) { .provider-btn:hover { border-color: var(--line); } }
+@media (max-width: 600px) {
+  header { padding: 12px 16px 8px; row-gap: 6px; }
+  h1 { font-size: 20px; }
+  #totals { order: 3; width: 100%; gap: 14px; }
+  .who { margin-left: auto; }
+  .who button#logout { padding: 6px 10px; }
+  .tabs { padding: 0 8px; }
+  .tabs button { flex: 1; padding: 10px 6px; }
+  .daybar { flex-wrap: nowrap; padding: 8px 16px; }
+  .dayinfo { min-width: 0; flex: 1; }
+  .daybar button { padding: 8px 12px; }
+  /* 16px+ text in fields stops iOS Safari zooming in on focus */
+  input, select, textarea { font-size: 16px !important; }
+  .scores input { width: 56px; }
+  .board-bar label { width: 100%; }
+  .board-bar select { flex: 1; max-width: none; }
+  .board-bar > button { flex: 1; }
+  .league-form label, .league-form input { width: 100%; }
+  .league-form > button { flex: 1; }
+  button.link { padding: 6px 8px; }
+  table { font-size: 13px; }
+  th, td { padding: 6px 5px; }
+  /* keep the name in view while the leaderboard scrolls sideways */
+  #board td:nth-child(2), table:has(#board) th:nth-child(2) { position: sticky; left: 0; background: var(--bg); }
+  #board tr.me td:nth-child(2) { background: color-mix(in srgb, var(--accent) 10%, var(--bg)); }
+}

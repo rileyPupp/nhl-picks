@@ -825,6 +825,19 @@ class Handler(SimpleHTTPRequestHandler):
     def log_message(self, format, *args):
         pass  # keep the console quiet
 
+    def send_header(self, keyword, value):
+        if keyword.lower() == "cache-control":
+            self._sent_cache_control = True
+        super().send_header(keyword, value)
+
+    def end_headers(self):
+        # Static files: make browsers (phones especially) check for a newer copy each load,
+        # so a deploy's CSS/JS shows up right away. Unchanged files come back as a 304.
+        if not getattr(self, "_sent_cache_control", False):
+            super().send_header("Cache-Control", "no-cache")
+        self._sent_cache_control = False
+        super().end_headers()
+
     def cookie(self, name):
         cookie = SimpleCookie(self.headers.get("Cookie") or "")
         return cookie[name].value if name in cookie else None
