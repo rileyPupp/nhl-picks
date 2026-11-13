@@ -36,6 +36,9 @@
     <nav class="tabs" role="tablist">
       <button role="tab" data-tab="games">Games</button>
       <button role="tab" data-tab="players">Player points</button>
+      <button role="tab" data-tab="standings">Standings</button>
+      <button role="tab" data-tab="teams">Teams</button>
+      <button role="tab" data-tab="news">News</button>
       <button role="tab" data-tab="board">Leaderboard</button>
     </nav>
 
@@ -62,6 +65,79 @@
           Call how many points each gets. <b>1 pt</b> for calling point / no point right, <b>+2</b> for the exact number (3+ counts as 3).
           A player who doesn't dress doesn't count.</p>
         <div id="players" class="grid"></div>
+      </section>
+
+      <section data-panel="standings" hidden>
+        <div class="period-bar">
+          <div class="seg" role="group" aria-label="Pick period">
+            <button data-period="week" aria-pressed="false">Week</button>
+            <button data-period="month" aria-pressed="false">Month</button>
+            <button data-period="season" aria-pressed="false">Season</button>
+          </div>
+          <div class="period-nav">
+            <button id="periodPrev" aria-label="Previous period">&lsaquo;</button>
+            <div id="periodLabel"></div>
+            <button id="periodNext" aria-label="Next period">&rsaquo;</button>
+          </div>
+        </div>
+        <div class="period-bar">
+          <div class="seg" role="group" aria-label="View">
+            <button data-view="picks" aria-pressed="false">My picks</button>
+            <button data-view="table" aria-pressed="false">Standings</button>
+          </div>
+          <div class="seg" id="groupSeg" role="group" aria-label="Group by">
+            <button data-group="league" aria-pressed="false">League</button>
+            <button data-group="conference" aria-pressed="false">Conference</button>
+            <button data-group="division" aria-pressed="false">Division</button>
+          </div>
+        </div>
+        <p class="muted small" id="periodExplain"></p>
+        <p class="muted small" id="pickRules">Rank all teams in each division from first to last.
+          <b>1 pt</b> for each team placed exactly right. Everyone's orders show once the period locks.</p>
+        <div id="standings" class="grid"></div>
+        <div id="standingsTable" hidden></div>
+        <div id="scoresBox" hidden>
+          <h2>Scores</h2>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>#</th><th>Player</th><th>Correct</th><th>Pts</th></tr></thead>
+              <tbody id="standingsScores"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section data-panel="teams" hidden>
+        <div class="board-bar">
+          <label>Sort by <select id="teamSort">
+            <option value="name">Name</option>
+            <option value="conference">Conference</option>
+            <option value="division">Division</option>
+            <option value="standing">Standing</option>
+          </select></label>
+        </div>
+        <div id="teamsGrid" class="grid"></div>
+        <div id="teamDetail" hidden>
+          <button id="teamBack" class="link-plain">&larr; All teams</button>
+          <div id="teamHead" class="card team-head"></div>
+          <div id="playerDetail" class="card" hidden></div>
+          <h2>Skaters</h2>
+          <p class="muted small">Regular season. Click a player for their season stats.</p>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Player</th><th>Pos</th><th>GP</th><th>G</th><th>A</th><th>Pts</th><th>+/-</th></tr></thead>
+              <tbody id="skaters"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section data-panel="news" hidden>
+        <div class="board-bar">
+          <label>Team <select id="newsTeam"></select></label>
+        </div>
+        <p class="muted small">Headlines from ESPN and CBS Sports, refreshed every 15 minutes. Tap a headline to read it on the source site.</p>
+        <div id="news"></div>
       </section>
 
       <section data-panel="board" hidden>

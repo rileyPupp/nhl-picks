@@ -15,7 +15,9 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import db
+import news
 import oauth
+import standings
 from db import Duplicate, placeholders
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -367,6 +369,18 @@ def fetch_roster_ids(team):
         data = _get_json(f"/roster/{team}/current")
         return {p["id"] for group in ("forwards", "defensemen") for p in data.get(group, [])}
     return _cached(("roster", team), load, ttl=SLOW_CACHE_SECONDS)
+
+
+def fetch_standings(when):
+    """Team standings for a YYYY-MM-DD date, or live ('now'). A past date never changes, so it's kept."""
+    path = "/standings/now" if when == "now" else f"/standings/{when}"
+    return _cached(("standings", when), lambda: standings.parse_standings(_get_json(path)),
+                   done=lambda rows: when != "now" and bool(rows))
+
+
+def fetch_player(player_id):
+    return _cached(("player", player_id), lambda: _get_json(f"/player/{player_id}/landing"),
+                   ttl=SLOW_CACHE_SECONDS)
 
 
 def is_locked(game):
@@ -816,6 +830,187 @@ def remove_member(user, body):
     return {"ok": True}
 
 
+# ---------- standings orders ----------
+
+TEAM_RE = re.compile(r"^[A-Z]{3}$")
+
+
+def _default(value):
+    """NHL API localized text comes as {'default': ..., 'fr': ...}."""
+    return value.get("default") if isinstance(value, dict) else value
+
+
+def _status(period, key, today):
+    if period not in standings.PERIODS:
+        raise BadRequest("Period must be week, month or season.")
+    try:
+        return standings.describe(period, key or standings.default_key(period, today), today)
+    except standings.PeriodError as e:
+        raise BadRequest(str(e))
+
+
+def _final_ranks(status):
+    """{team: {division, division_rank, points}} from the period's last-day standings.
+
+    Stored the first time anyone asks after the period ends, so later NHL data can't change grades.
+    """
+    with db.connect() as conn:
+        rows = conn.all("SELECT team, division, division_rank, points FROM standings_results "
+                        "WHERE period_type = ? AND period_key = ?", (status["type"], status["key"]))
+    if not rows:
+        snapshot = fetch_standings(status["end"])
+        if not snapshot:
+            return {}
+        rows = [{"team": t["team"], "division": t["division"], "division_rank": t["divisionRank"],
+                 "points": t["pts"]} for t in snapshot]
+        with db.connect() as conn:
+            conn.many("INSERT INTO standings_results (period_type, period_key, team, division, division_rank, points) "
+                      "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                      [(status["type"], status["key"], r["team"], r["division"], r["division_rank"], r["points"])
+                       for r in rows])
+    return {r["team"]: r for r in rows}
+
+
+def api_standings(user, query):
+    today = date_cls.today()
+    period = query.get("period", ["week"])[0]
+    status = _status(period, query.get("key", [None])[0], today)
+    final = _final_ranks(status) if status["final"] else {}
+    ranks = {team: r["division_rank"] for team, r in final.items()}
+    divisions = standings.group_divisions(fetch_standings(standings.snapshot_date(status)))
+
+    with db.connect() as conn:
+        rows = conn.all("SELECT o.user_id, u.name, o.division, o.team, o.predicted_rank FROM standings_orders o "
+                        "JOIN users u ON u.id = o.user_id WHERE o.period_type = ? AND o.period_key = ?",
+                        (period, status["key"]))
+    by_user = {}  # user_id -> {"name", "orders": {division: {team: rank}}}
+    for r in rows:
+        entry = by_user.setdefault(r["user_id"], {"name": r["name"], "orders": {}})
+        entry["orders"].setdefault(r["division"], {})[r["team"]] = r["predicted_rank"]
+
+    def ordered(order):
+        return [team for team, _ in sorted(order.items(), key=lambda kv: kv[1])]
+
+    mine = by_user.get(user["id"], {"orders": {}})["orders"]
+    # Everyone's orders stay hidden until the period locks, so nobody can copy one.
+    picks = {}
+    for uid, entry in by_user.items():
+        if uid != user["id"] and not status["locked"]:
+            continue
+        for div, order in entry["orders"].items():
+            picks.setdefault(div, []).append({"name": entry["name"], "mine": uid == user["id"],
+                                              "order": ordered(order)})
+
+    scores = []
+    if final:
+        for entry in by_user.values():
+            points = sum(standings.score_order(order, ranks) for order in entry["orders"].values())
+            placed = sum(len(order) for order in entry["orders"].values())
+            scores.append({"name": entry["name"], "points": points, "placed": placed,
+                           "possible": placed})
+        scores.sort(key=lambda s: (-s["points"], s["name"].lower()))
+
+    for div in divisions:
+        div["mine"] = ordered(mine[div["abbrev"]]) if div["abbrev"] in mine else None
+        div["picks"] = sorted(picks.get(div["abbrev"], []), key=lambda p: p["name"].lower())
+    return {
+        "period": {**status, "prevKey": standings.prev_key(period, status["key"]),
+                   "nextKey": standings.next_key(period, status["key"])},
+        "asOf": standings.snapshot_date(status),
+        "final": final and True or False,
+        "divisions": divisions,
+        "scores": scores,
+    }
+
+
+def save_standings_order(user, body):
+    today = date_cls.today()
+    status = _status(body.get("period"), body.get("key"), today)
+    if status["locked"]:
+        raise Conflict("This period has started, so its picks are locked.")
+    division = body.get("division")
+    members = {t["team"] for t in fetch_standings("now") if t["division"] == division}
+    if not members:
+        raise BadRequest("Pick a division from the standings.")
+    order = body.get("teams") or []  # an empty list clears the pick
+    if not isinstance(order, list) or not all(isinstance(t, str) for t in order):
+        raise BadRequest("Send the teams in order.")
+    if order and (len(order) != len(members) or set(order) != members):
+        raise BadRequest(f"Rank all {len(members)} teams in that division, each once.")
+    with db.connect() as conn:
+        conn.run("DELETE FROM standings_orders WHERE user_id = ? AND period_type = ? "
+                 "AND period_key = ? AND division = ?",
+                 (user["id"], status["type"], status["key"], division))
+        if order:
+            conn.many("INSERT INTO standings_orders (user_id, period_type, period_key, division, team, predicted_rank) "
+                      "VALUES (?, ?, ?, ?, ?, ?)",
+                      [(user["id"], status["type"], status["key"], division, t, i + 1)
+                       for i, t in enumerate(order)])
+    return {"period": status["type"], "key": status["key"], "division": division, "teams": order}
+
+
+# ---------- teams, players, news ----------
+
+def api_teams(user):
+    return {"teams": sorted(fetch_standings("now"), key=lambda t: t["name"])}
+
+
+def api_team(user, code):
+    code = (code or "").upper()
+    row = next((t for t in fetch_standings("now") if t["team"] == code), None) if TEAM_RE.match(code) else None
+    if row is None:
+        raise NotFound("No team with that code.")
+    skaters = []
+    for s in fetch_team_skaters(code):
+        skaters.append({
+            "id": s["playerId"], "name": f'{_default(s["firstName"])} {_default(s["lastName"])}',
+            "position": s.get("positionCode"), "gp": s.get("gamesPlayed") or 0,
+            "goals": s.get("goals") or 0, "assists": s.get("assists") or 0,
+            "points": s.get("points") or 0, "plusMinus": s.get("plusMinus") or 0,
+            "headshot": s.get("headshot"),
+        })
+    skaters.sort(key=lambda s: (-s["points"], s["name"]))
+    return {"team": row, "skaters": skaters}
+
+
+def api_player(user, player_id):
+    if not str(player_id).isdigit():
+        raise NotFound("No player with that id.")
+    data = fetch_player(player_id)
+    seasons = [{
+        "season": s.get("season"), "team": _default(s.get("teamCommonName")),
+        "gp": s.get("gamesPlayed") or 0, "goals": s.get("goals") or 0,
+        "assists": s.get("assists") or 0, "points": s.get("points") or 0,
+        "plusMinus": s.get("plusMinus") or 0, "pim": s.get("pim") or 0,
+        "shots": s.get("shots") or 0, "avgToi": s.get("avgToi"),
+        "powerPlayPoints": s.get("powerPlayPoints") or 0,
+    } for s in data.get("seasonTotals", []) if s.get("gameTypeId") == 2 and s.get("leagueAbbrev") == "NHL"]
+    return {
+        "player": {
+            "id": data.get("playerId"),
+            "name": f'{_default(data.get("firstName"))} {_default(data.get("lastName"))}',
+            "position": data.get("position"), "number": data.get("sweaterNumber"),
+            "team": data.get("currentTeamAbbrev"), "teamLogo": data.get("teamLogo"),
+            "headshot": data.get("headshot"), "birthDate": data.get("birthDate"),
+            "birthCountry": data.get("birthCountry"), "shoots": data.get("shootsCatches"),
+            "heightInInches": data.get("heightInInches"), "weightInPounds": data.get("weightInPounds"),
+            "active": data.get("isActive"),
+        },
+        "seasons": seasons,
+    }
+
+
+def api_news(user, query):
+    team = (query.get("team", [""])[0] or "").upper() or None
+    if team and not TEAM_RE.match(team):
+        raise BadRequest("Team must be a 3-letter code.")
+    try:
+        limit = min(max(int(query.get("limit", ["40"])[0]), 1), 100)
+    except ValueError:
+        raise BadRequest("Limit must be a number.")
+    return {"items": news.list_items(team, limit)}
+
+
 # ---------- HTTP ----------
 
 class Handler(SimpleHTTPRequestHandler):
@@ -920,7 +1115,16 @@ class Handler(SimpleHTTPRequestHandler):
             "/api/players": self._signed_in(lambda u: api_players(u, query)),
             "/api/leaderboard": self._signed_in(lambda u: leaderboard(u, query)),
             "/api/leagues": self._signed_in(my_leagues),
+            "/api/standings": self._signed_in(lambda u: api_standings(u, query)),
+            "/api/teams": self._signed_in(api_teams),
+            "/api/news": self._signed_in(lambda u: api_news(u, query)),
         }
+        if url.path.startswith("/api/teams/"):
+            code = url.path.removeprefix("/api/teams/")
+            return self._respond(self._signed_in(lambda u: api_team(u, code)))
+        if url.path.startswith("/api/players/"):
+            player_id = url.path.removeprefix("/api/players/")
+            return self._respond(self._signed_in(lambda u: api_player(u, player_id)))
         route = routes.get(url.path)
         if route is None:
             return self.send_json(404, {"error": "Not found."})
@@ -963,6 +1167,7 @@ class Handler(SimpleHTTPRequestHandler):
             "/api/leagues/join": self._signed_in(lambda u: join_league(u, body())),
             "/api/leagues/leave": self._signed_in(lambda u: leave_league(u, body())),
             "/api/leagues/remove": self._signed_in(lambda u: remove_member(u, body())),
+            "/api/standings-order": self._signed_in(lambda u: {"order": save_standings_order(u, body())}),
         }
         route = routes.get(url.path)
         if route is None:
@@ -972,6 +1177,7 @@ class Handler(SimpleHTTPRequestHandler):
 
 def main():
     db.init()
+    news.start_background_refresh()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     where = f"http://localhost:{PORT}" if HOST in ("127.0.0.1", "localhost") else f"http://<this computer's IP>:{PORT}"
     print(f"NHL Picks running at {where}  using {db.describe()}  (Ctrl+C to stop)")

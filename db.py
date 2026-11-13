@@ -221,7 +221,36 @@ CREATE TABLE IF NOT EXISTS oauth_states (
     intent TEXT NOT NULL,
     user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
     expires {_REAL} NOT NULL
-)
+);
+CREATE TABLE IF NOT EXISTS standings_orders (
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    period_type TEXT NOT NULL,
+    period_key TEXT NOT NULL,
+    division TEXT NOT NULL,
+    team TEXT NOT NULL,
+    predicted_rank INTEGER NOT NULL,
+    PRIMARY KEY (user_id, period_type, period_key, team)
+);
+CREATE INDEX IF NOT EXISTS standings_orders_period ON standings_orders (period_type, period_key);
+CREATE TABLE IF NOT EXISTS standings_results (
+    period_type TEXT NOT NULL,
+    period_key TEXT NOT NULL,
+    team TEXT NOT NULL,
+    division TEXT NOT NULL,
+    division_rank INTEGER NOT NULL,
+    points INTEGER NOT NULL,
+    PRIMARY KEY (period_type, period_key, team)
+);
+CREATE TABLE IF NOT EXISTS news_items (
+    link TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    title TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    published TEXT NOT NULL,
+    teams TEXT NOT NULL,
+    fetched TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS news_items_published ON news_items (published);
 """
 
 
