@@ -27,7 +27,7 @@ const drafts = {};
 async function api(path, opts) {
   const res = await fetch(path, opts);
   const data = await res.json().catch(() => ({}));
-  if (res.status === 401 && !path.startsWith("/api/login")) showAuth();
+  if (res.status === 401 && !path.startsWith("/api/login") && me) showAuth();
   if (!res.ok) throw new Error(data.error || res.statusText);
   return data;
 }
@@ -45,37 +45,126 @@ function flash(text, isError = false) {
 
 // ---------- sign in ----------
 
-function showAuth() {
-  $("#app").hidden = true;
-  $("#auth").hidden = false;
-  $("#authName").focus();
+let authInfo = { providers: [], pinSignup: true };
+let me = null;
+
+// Messages handed back in the URL after Google/GitHub sign-in, plus league invite links.
+const params = new URLSearchParams(location.search);
+const session = {
+  get: (k) => { try { return sessionStorage.getItem(k); } catch { return null; } },
+  set: (k, v) => { try { v == null ? sessionStorage.removeItem(k) : sessionStorage.setItem(k, v); } catch {} },
+};
+if (params.get("join")) session.set("joinCode", params.get("join")); // survives the sign-in round trip
+const notice = params.get("auth_error")
+  ? { text: params.get("auth_error"), bad: true }
+  : params.get("linked") ? { text: `Linked your ${params.get("linked") === "github" ? "GitHub" : "Google"} account. You'll use it to sign in from now on.` }
+  : params.get("welcome") ? { text: "Welcome! Tap your name at the top to change how it shows on leaderboards." }
+  : null;
+if (location.search) history.replaceState(null, "", location.pathname);
+
+const providerIcon = {
+  google: `<svg viewBox="0 0 48 48" width="18" height="18" aria-hidden="true"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.8 2.4 30.2 0 24 0 14.6 0 6.6 5.4 2.7 13.2l7.9 6.2C12.5 13.6 17.8 9.5 24 9.5z"/><path fill="#4285F4" d="M46.1 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.4c-.5 2.9-2.2 5.3-4.6 6.9l7.4 5.8c4.3-4 6.9-9.9 6.9-17.2z"/><path fill="#FBBC05" d="M10.6 28.6c-.5-1.4-.8-3-.8-4.6s.3-3.2.8-4.6l-7.9-6.2C1 16.6 0 20.2 0 24s1 7.4 2.7 10.8l7.9-6.2z"/><path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.4-5.8c-2.1 1.4-4.8 2.3-8.5 2.3-6.2 0-11.5-4.1-13.4-9.9l-7.9 6.2C6.6 42.6 14.6 48 24 48z"/></svg>`,
+  github: `<svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true" fill="currentColor"><path d="M8 0C3.6 0 0 3.6 0 8c0 3.5 2.3 6.5 5.5 7.6.4.1.5-.2.5-.4v-1.4c-2.2.5-2.7-1-2.7-1-.4-.9-.9-1.2-.9-1.2-.7-.5.1-.5.1-.5.8.1 1.2.8 1.2.8.7 1.3 1.9.9 2.4.7.1-.5.3-.9.5-1.1-1.8-.2-3.6-.9-3.6-4 0-.9.3-1.6.8-2.1-.1-.2-.4-1 .1-2.1 0 0 .7-.2 2.2.8.6-.2 1.3-.3 2-.3s1.4.1 2 .3c1.5-1 2.2-.8 2.2-.8.4 1.1.2 1.9.1 2.1.5.6.8 1.3.8 2.1 0 3.1-1.9 3.7-3.6 4 .3.3.6.8.6 1.5v2.2c0 .2.1.5.6.4C13.7 14.5 16 11.5 16 8c0-4.4-3.6-8-8-8z"/></svg>`,
+};
+const providerButton = (p, intent) =>
+  `<a class="provider-btn" href="/auth/${p.id}/start?intent=${intent}">${providerIcon[p.id] || ""}<span>${intent === "link" ? "Link" : "Continue with"} ${esc(p.label)}</span></a>`;
+
+function showAuthMessage(text, bad) {
+  const m = $("#authMsg");
+  m.className = "msg " + (bad ? "bad" : "good");
+  m.textContent = text;
+  m.hidden = false;
 }
 
-function showApp(user) {
+function showAuth() {
+  me = null;
+  $("#app").hidden = true;
+  $("#auth").hidden = false;
+  const hasProviders = authInfo.providers.length > 0;
+  $("#providers").hidden = !hasProviders;
+  $("#providers").innerHTML = authInfo.providers.map((p) => providerButton(p, "login")).join("");
+  $("#pinBox").open = !hasProviders;
+  $("#pinBox").classList.toggle("only", !hasProviders);
+  $("#pinSummary").textContent = hasProviders ? "Have an older PIN account? Sign in here" : "Sign in";
+  $("#registerBtn").hidden = !authInfo.pinSignup;
+  $("#pinHelp").textContent = authInfo.pinSignup
+    ? "New here? Choose a name and a 4–6 digit PIN, then press Create account."
+    : "After you sign in, link Google or GitHub to keep your account.";
+  if (session.get("joinCode") && $("#authMsg").hidden)
+    showAuthMessage("You've been invited to a league. Sign in to join.", false);
+}
+
+function renderLinkBanner() {
+  const banner = $("#linkBanner");
+  const show = me && me.hasPin && authInfo.providers.length > 0;
+  banner.hidden = !show;
+  if (!show) return;
+  banner.innerHTML = `<p><b>Secure your account.</b> Link Google or GitHub and use it to sign in. Your PIN stops working once you link.</p>
+    <div class="providers-row">${authInfo.providers.map((p) => providerButton(p, "link")).join("")}</div>`;
+}
+
+async function showApp(user) {
+  me = user;
   $("#auth").hidden = true;
   $("#app").hidden = false;
   $("#whoName").textContent = user.name;
+  renderLinkBanner();
+  await loadLeagues();
+  const code = session.get("joinCode");
+  if (code) {
+    session.set("joinCode", null);
+    tab = "board";
+    await joinByCode(code).catch((err) => flash(err.message, true));
+  }
   setTab(tab);
+}
+
+async function start() {
+  try {
+    const data = await api("/api/me");
+    authInfo = data.auth;
+    if (data.user) await showApp(data.user);
+    else showAuth();
+  } catch {
+    showAuth();
+  }
+  if (notice) {
+    if (me) flash(notice.text, notice.bad);
+    else showAuthMessage(notice.text, notice.bad);
+  }
 }
 
 $("#authForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const mode = e.submitter?.dataset.mode || "login";
-  const msg = $("#authMsg");
-  msg.hidden = true;
+  $("#authMsg").hidden = true;
   try {
-    const { user } = await post(`/api/${mode}`, { name: $("#authName").value.trim(), pin: $("#authPin").value });
+    await post(`/api/${mode}`, { name: $("#authName").value.trim(), pin: $("#authPin").value });
     $("#authPin").value = "";
-    showApp(user);
+    start();
   } catch (err) {
-    msg.textContent = err.message;
-    msg.hidden = false;
+    showAuthMessage(err.message, true);
   }
 });
 
 $("#logout").onclick = async () => {
   await post("/api/logout", {}).catch(() => {});
   showAuth();
+};
+
+$("#whoName").onclick = async () => {
+  const name = prompt("Your name on leaderboards (2–20 letters, numbers, spaces, . - _):", me?.name || "");
+  if (name == null || !name.trim() || name.trim() === me?.name) return;
+  try {
+    const res = await post("/api/me/name", { name: name.trim() });
+    me.name = res.name;
+    $("#whoName").textContent = res.name;
+    flash("Name changed.");
+    loadLeagues();
+    loadBoard();
+  } catch (err) {
+    flash(err.message, true);
+  }
 };
 
 // ---------- winner picks ----------
@@ -251,11 +340,130 @@ $("#players").addEventListener("click", async (e) => {
   }
 });
 
+// ---------- leagues ----------
+
+const store = {
+  get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
+  set: (k, v) => { try { localStorage.setItem(k, v); } catch {} },
+};
+let leagues = [];
+let board = store.get("board") || ""; // "" = not chosen yet, "all" = everyone, else league id
+let leagueFormMode = null;
+
+const currentLeague = () => leagues.find((l) => String(l.id) === board) || null;
+const inviteLink = (code) => `${location.origin}/?join=${encodeURIComponent(code)}`;
+
+function setBoard(value) {
+  board = String(value);
+  store.set("board", board);
+  renderLeagues();
+  loadBoard();
+}
+
+async function loadLeagues() {
+  try {
+    leagues = (await api("/api/leagues")).leagues;
+  } catch {
+    leagues = [];
+  }
+  if (board !== "all" && !currentLeague()) board = leagues.length ? String(leagues[0].id) : "all";
+  renderLeagues();
+}
+
+function renderLeagues() {
+  $("#boardSelect").innerHTML =
+    `<option value="all">Everyone</option>` +
+    leagues.map((l) => `<option value="${l.id}">${esc(l.name)}</option>`).join("");
+  $("#boardSelect").value = currentLeague() ? board : "all";
+
+  const l = currentLeague();
+  const info = $("#leagueInfo");
+  info.hidden = !l;
+  if (!l) return;
+  const members = l.members.map((m) => `<li>${esc(m.name)}${m.id === l.ownerId ? ` <span class="muted small">(owner)</span>` : ""}
+      ${l.isOwner && m.id !== l.ownerId ? `<button class="link" data-remove="${m.id}" data-name="${esc(m.name)}">Remove</button>` : ""}</li>`).join("");
+  info.innerHTML = `
+    <div class="league-head">
+      <div><b>${esc(l.name)}</b> <span class="muted small">· ${l.members.length} player${l.members.length === 1 ? "" : "s"}</span></div>
+      <div class="invite">Invite code <code>${esc(l.code)}</code>
+        <button id="copyInvite">Copy invite link</button>
+        <button id="leaveLeague">Leave</button>
+      </div>
+    </div>
+    <details><summary class="small">Members</summary><ul class="members">${members}</ul></details>`;
+}
+
+function openLeagueForm(mode) {
+  leagueFormMode = mode;
+  $("#leagueFormLabel").textContent = mode === "new" ? "League name" : "Invite code";
+  $("#leagueSubmit").textContent = mode === "new" ? "Create" : "Join";
+  $("#leagueInput").value = "";
+  $("#leagueForm").hidden = false;
+  $("#leagueInput").focus();
+}
+
+async function joinByCode(code) {
+  const res = await post("/api/leagues/join", { code });
+  flash(res.alreadyIn ? `You're already in ${res.league.name}.` : `Joined ${res.league.name}!`);
+  await loadLeagues();
+  setBoard(res.league.id);
+}
+
+$("#newLeague").onclick = () => openLeagueForm("new");
+$("#joinLeague").onclick = () => openLeagueForm("join");
+$("#leagueCancel").onclick = () => ($("#leagueForm").hidden = true);
+$("#boardSelect").onchange = (e) => setBoard(e.target.value);
+
+$("#leagueForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const value = $("#leagueInput").value.trim();
+  try {
+    if (leagueFormMode === "new") {
+      const { league } = await post("/api/leagues", { name: value });
+      flash(`Made ${league.name}. Share the invite link with your friends.`);
+      await loadLeagues();
+      setBoard(league.id);
+    } else {
+      await joinByCode(value);
+    }
+    $("#leagueForm").hidden = true;
+  } catch (err) {
+    flash(err.message, true);
+  }
+});
+
+$("#leagueInfo").addEventListener("click", async (e) => {
+  const l = currentLeague();
+  if (!l) return;
+  try {
+    if (e.target.id === "copyInvite") {
+      await navigator.clipboard.writeText(inviteLink(l.code));
+      flash("Invite link copied.");
+    } else if (e.target.id === "leaveLeague") {
+      if (!confirm(`Leave ${l.name}?`)) return;
+      await post("/api/leagues/leave", { leagueId: l.id });
+      flash(`You left ${l.name}.`);
+      board = "";
+      await loadLeagues();
+      loadBoard();
+    } else if (e.target.dataset.remove) {
+      if (!confirm(`Remove ${e.target.dataset.name} from ${l.name}?`)) return;
+      await post("/api/leagues/remove", { leagueId: l.id, userId: Number(e.target.dataset.remove) });
+      await loadLeagues();
+      loadBoard();
+    }
+  } catch (err) {
+    flash(err.message, true);
+  }
+});
+
+
 // ---------- leaderboard ----------
 
 async function loadBoard() {
   try {
-    const b = await api("/api/leaderboard");
+    const league = currentLeague();
+    const b = await api(`/api/leaderboard${league ? `?league=${league.id}` : ""}`);
     const me = b.rows.find((r) => r.me);
     const rank = me?.qualified ? b.rows.filter((r) => r.qualified).indexOf(me) + 1 : null;
     $("#totals").innerHTML = me
@@ -316,6 +524,4 @@ $("#next").onclick = () => setDate(shiftDate(date, 1));
 $("#today").onclick = () => setDate(localDate(new Date()));
 $("#dateInput").onchange = (e) => e.target.value && setDate(e.target.value);
 
-api("/api/me")
-  .then(({ user }) => (user ? showApp(user) : showAuth()))
-  .catch(showAuth);
+start();

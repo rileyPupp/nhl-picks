@@ -1,0 +1,29 @@
+# Render Blueprint: Dashboard -> New -> Blueprint -> pick this repo.
+# Secrets marked sync: false are typed in on Render when the Blueprint is created.
+services:
+  - type: web
+    name: nhl-picks
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    healthCheckPath: /api/me
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.1
+      - key: HOST
+        value: 0.0.0.0
+      - key: SECURE_COOKIES
+        value: "1"
+      - key: DATABASE_URL # Postgres connection string, e.g. from Neon
+        sync: false
+      - key: PUBLIC_URL # e.g. https://nhl-picks.onrender.com
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GITHUB_CLIENT_ID
+        sync: false
+      - key: GITHUB_CLIENT_SECRET
+        sync: false

@@ -15,11 +15,40 @@ Each night three skaters are drawn, the same three for everyone: one **star**, o
 - Nights you sit out don't count against you, so joining late or missing a night is fine.
 - You need 5 nights to get a rank.
 
-## Run it
-Double-click `start.bat` (or run `python server.py`), then open http://localhost:8000. Requires Python 3 only; no packages to install.
+## Leagues
+Make a league from the Leaderboard tab and share its invite link (or 6-letter code). The Board picker switches between a league and Everyone. Anyone can leave; the owner can remove players. If the owner leaves, the longest-standing member becomes owner, and an empty league is deleted.
 
-Everyone signs in with a name and a 4-6 digit PIN. Data is saved in `nhl-picks.db` (SQLite) in this folder. Picks from the old single-player version (`picks.json`) are moved to the first account created, and the file is renamed `picks.json.imported`.
+## Signing in
+- **With Google or GitHub** once their keys are set (see below). New players can only sign up this way.
+- **With a name + PIN** when no Google/GitHub keys are set (local play). Older PIN accounts can still sign in by PIN; the app then asks them to link Google or GitHub, and the PIN stops working once linked. `ALLOW_PIN_SIGNUP=1` keeps PIN sign-up open.
+- Tap your name at the top to change how it shows on leaderboards.
 
-### Letting friends play
-- **Same Wi-Fi:** run with `HOST=0.0.0.0` (in PowerShell: `$env:HOST="0.0.0.0"; python server.py`) and have them open `http://<your computer's IP>:8000`. Windows may ask to allow Python through the firewall.
-- **Anywhere:** host it on a small server (any VPS, Render, Fly.io, ...). Set `HOST=0.0.0.0`, `PORT` as the host requires, and `SECURE_COOKIES=1` when it's served over HTTPS. Keep `nhl-picks.db` on persistent storage, or set `NHL_PICKS_DB` to a path that is.
+## Run it locally
+Double-click `start.bat` (or run `python server.py`), then open http://localhost:8000. Locally it needs Python 3 only: data goes in `nhl-picks.db` (SQLite) in this folder, which is never committed.
+
+## Put it online (Render + Neon, free)
+The web app runs on [Render](https://render.com), the database on [Neon](https://neon.tech) (Render's own free Postgres is deleted after 30 days; Neon's isn't). Render's free plan sleeps after 15 idle minutes, so the first visit after that takes about a minute.
+
+1. **Database.** Sign up at Neon, create a project, and copy the connection string (`postgresql://...?sslmode=require`).
+2. **Copy your current data** (optional, before anyone signs up on the site):
+   ```
+   pip install -r requirements.txt
+   $env:DATABASE_URL="<Neon connection string>"; python copy_to_postgres.py
+   ```
+3. **Web app.** Push this repo to GitHub. On Render: New → Blueprint → pick the repo. It reads `render.yaml` and asks for the secret values; put the Neon string in `DATABASE_URL` and leave the rest blank for now. After it deploys, note the site address (e.g. `https://nhl-picks.onrender.com`) and set `PUBLIC_URL` to it.
+4. **Google sign-in.** In [Google Cloud Console](https://console.cloud.google.com/apis/credentials): create a project → OAuth consent screen (External, app name, your email; Publish it so anyone can sign in) → Credentials → Create OAuth client ID → Web application. Authorized redirect URI: `<PUBLIC_URL>/auth/google/callback`. Copy the client ID and secret into Render as `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`.
+5. **GitHub sign-in.** GitHub → Settings → Developer settings → OAuth Apps → New. Homepage: `<PUBLIC_URL>`. Callback URL: `<PUBLIC_URL>/auth/github/callback`. Generate a client secret, then set `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` on Render.
+6. Render redeploys when env vars change. Open the site, sign in with your old PIN, and link Google or GitHub.
+
+To try Google/GitHub sign-in on your own computer, make a second OAuth app with callback `http://localhost:8000/auth/<provider>/callback` and set the same variables locally (a GitHub OAuth app allows only one callback URL).
+
+### All settings
+| Variable | What it does |
+|---|---|
+| `DATABASE_URL` | Postgres connection string. Unset = local SQLite file. |
+| `PUBLIC_URL` | The site's address, used for sign-in callbacks. Default `http://localhost:<PORT>`. |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Turn on Google sign-in. |
+| `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | Turn on GitHub sign-in. |
+| `HOST`, `PORT` | Where the server listens. Use `HOST=0.0.0.0` online (Render sets `PORT`). |
+| `SECURE_COOKIES` | `1` when served over HTTPS. |
+| `ALLOW_PIN_SIGNUP` | `1` keeps PIN sign-up open even with Google/GitHub on. |

@@ -6,22 +6,25 @@ import os
 import random
 import re
 import secrets
-import sqlite3
 import threading
 import time
 import urllib.request
 from datetime import date as date_cls, datetime, timedelta, timezone
 from http.cookies import SimpleCookie
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
+
+import db
+import oauth
+from db import Duplicate, placeholders
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
-DB_FILE = os.environ.get("NHL_PICKS_DB", os.path.join(BASE_DIR, "nhl-picks.db"))
 LEGACY_PICKS_FILE = os.path.join(BASE_DIR, "picks.json")
 HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "8000"))
 SECURE_COOKIES = os.environ.get("SECURE_COOKIES") == "1"  # set when served over HTTPS
+PUBLIC_URL = os.environ.get("PUBLIC_URL", f"http://localhost:{PORT}")  # where OAuth sends people back
 
 NHL = "https://api-web.nhle.com/v1"
 CACHE_SECONDS = 60
@@ -40,12 +43,13 @@ MIN_NIGHTS = 5  # nights needed to qualify for the leaderboard
 MIN_GAMES_PLAYED = 3  # a skater needs this many games this season to be drawn
 
 SESSION_COOKIE = "session"
+STATE_COOKIE = "oauth_state"
+OAUTH_STATE_SECONDS = 600
 SESSION_DAYS = 365
 MAX_LOGIN_FAILS, LOCKOUT_SECONDS = 5, 300
 
 _cache = {}
 _cache_lock = threading.Lock()
-_db_lock = threading.Lock()
 _login_fails = {}
 _login_lock = threading.Lock()
 
@@ -74,71 +78,14 @@ class TooManyAttempts(AppError):
     status = 429
 
 
-# ---------- database ----------
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
-    pin_salt TEXT NOT NULL,
-    pin_hash TEXT NOT NULL,
-    created TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS sessions (
-    token TEXT PRIMARY KEY,
-    user_id INTEGER NOT NULL REFERENCES users(id),
-    expires REAL NOT NULL
-);
-CREATE TABLE IF NOT EXISTS picks (
-    user_id INTEGER NOT NULL REFERENCES users(id),
-    game_id TEXT NOT NULL,
-    date TEXT NOT NULL,
-    winner TEXT NOT NULL,
-    away_score INTEGER,
-    home_score INTEGER,
-    PRIMARY KEY (user_id, game_id)
-);
-CREATE TABLE IF NOT EXISTS slates (
-    date TEXT NOT NULL,
-    slot INTEGER NOT NULL,
-    player_id INTEGER NOT NULL,
-    name TEXT NOT NULL,
-    position TEXT,
-    team TEXT NOT NULL,
-    opponent TEXT NOT NULL,
-    game_id TEXT NOT NULL,
-    headshot TEXT,
-    tier TEXT NOT NULL,
-    season_gp INTEGER NOT NULL,
-    season_points INTEGER NOT NULL,
-    PRIMARY KEY (date, slot)
-);
-CREATE TABLE IF NOT EXISTS player_picks (
-    user_id INTEGER NOT NULL REFERENCES users(id),
-    date TEXT NOT NULL,
-    player_id INTEGER NOT NULL,
-    guess INTEGER NOT NULL,
-    PRIMARY KEY (user_id, date, player_id)
-);
-"""
-
-
-def db():
-    conn = sqlite3.connect(DB_FILE, timeout=10)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
-
-
-def init_db():
-    with db() as conn:
-        conn.executescript(SCHEMA)
-
-
 # ---------- accounts ----------
 
 NAME_RE = re.compile(r"^[A-Za-z0-9 _.-]{2,20}$")
 PIN_RE = re.compile(r"^\d{4,6}$")
+
+
+def _now():
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _hash_pin(pin, salt):
@@ -157,9 +104,9 @@ def _clean_credentials(body):
 
 def _new_session(conn, user_id):
     token = secrets.token_urlsafe(32)
-    conn.execute("DELETE FROM sessions WHERE expires < ?", (time.time(),))
-    conn.execute("INSERT INTO sessions (token, user_id, expires) VALUES (?, ?, ?)",
-                 (token, user_id, time.time() + SESSION_DAYS * 86400))
+    conn.run("DELETE FROM sessions WHERE expires < ?", (time.time(),))
+    conn.run("INSERT INTO sessions (token, user_id, expires) VALUES (?, ?, ?)",
+             (token, user_id, time.time() + SESSION_DAYS * 86400))
     return token
 
 
@@ -171,24 +118,41 @@ def _import_legacy_picks(conn, user_id):
         legacy = json.load(f)
     rows = [(user_id, str(gid), p["date"], p["winner"], p.get("awayScore"), p.get("homeScore"))
             for gid, p in legacy.items() if p.get("date") and p.get("winner")]
-    conn.executemany("INSERT OR IGNORE INTO picks VALUES (?, ?, ?, ?, ?, ?)", rows)
+    conn.many("INSERT INTO picks (user_id, game_id, date, winner, away_score, home_score) "
+              "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING", rows)
     return len(rows)
 
 
+def pin_signup_allowed():
+    """PIN accounts are for local play. Once Google/GitHub is set up, new players use those."""
+    return not oauth.enabled() or os.environ.get("ALLOW_PIN_SIGNUP") == "1"
+
+
+def _create_user(conn, name, salt="", pin_hash=""):
+    """Insert a user (no PIN when salt/hash are empty). Returns (id, imported legacy pick count)."""
+    first_user = conn.value("SELECT COUNT(*) AS n FROM users") == 0
+    user_id = conn.value("INSERT INTO users (name, pin_salt, pin_hash, created) VALUES (?, ?, ?, ?) "
+                         "RETURNING id", (name, salt, pin_hash, _now()))
+    return user_id, (_import_legacy_picks(conn, user_id) if first_user else 0)
+
+
+def _finish_import(imported):
+    if imported and os.path.exists(LEGACY_PICKS_FILE):
+        os.replace(LEGACY_PICKS_FILE, LEGACY_PICKS_FILE + ".imported")
+
+
 def register(body):
+    if not pin_signup_allowed():
+        raise Conflict("New accounts sign up with Google or GitHub.")
     name, pin = _clean_credentials(body)
     salt = secrets.token_hex(16)
-    with _db_lock, db() as conn:
-        if conn.execute("SELECT 1 FROM users WHERE name = ?", (name,)).fetchone():
-            raise Conflict("That name is taken. Pick another, or sign in.")
-        first_user = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
-        cur = conn.execute("INSERT INTO users (name, pin_salt, pin_hash, created) VALUES (?, ?, ?, ?)",
-                           (name, salt, _hash_pin(pin, salt), datetime.now(timezone.utc).isoformat()))
-        user_id = cur.lastrowid
-        imported = _import_legacy_picks(conn, user_id) if first_user else 0
-        token = _new_session(conn, user_id)
-    if imported:
-        os.replace(LEGACY_PICKS_FILE, LEGACY_PICKS_FILE + ".imported")
+    try:
+        with db.connect() as conn:
+            user_id, imported = _create_user(conn, name, salt, _hash_pin(pin, salt))
+            token = _new_session(conn, user_id)
+    except Duplicate:
+        raise Conflict("That name is taken. Pick another, or sign in.")
+    _finish_import(imported)
     return {"id": user_id, "name": name}, token
 
 
@@ -199,8 +163,10 @@ def login(body):
         fails, until = _login_fails.get(key, (0, 0))
         if until > time.time():
             raise TooManyAttempts("Too many wrong PINs. Try again in a few minutes.")
-    with _db_lock, db() as conn:
-        row = conn.execute("SELECT * FROM users WHERE name = ?", (name,)).fetchone()
+    with db.connect() as conn:
+        row = conn.one("SELECT * FROM users WHERE lower(name) = lower(?)", (name,))
+        if row is not None and not row["pin_hash"]:
+            raise Unauthorized("This account signs in with Google or GitHub.")
         ok = row is not None and hmac.compare_digest(row["pin_hash"], _hash_pin(pin, row["pin_salt"]))
         if ok:
             token = _new_session(conn, row["id"])
@@ -218,16 +184,115 @@ def login(body):
 def user_for_token(token):
     if not token:
         return None
-    with db() as conn:
-        row = conn.execute(
+    with db.connect() as conn:
+        return conn.one(
             "SELECT users.id, users.name FROM sessions JOIN users ON users.id = sessions.user_id "
-            "WHERE token = ? AND expires > ?", (token, time.time())).fetchone()
-    return dict(row) if row else None
+            "WHERE token = ? AND expires > ?", (token, time.time()))
 
 
 def logout(token):
-    with _db_lock, db() as conn:
-        conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+    with db.connect() as conn:
+        conn.run("DELETE FROM sessions WHERE token = ?", (token,))
+
+
+def me(token):
+    user = user_for_token(token)
+    auth = {"providers": oauth.enabled(), "pinSignup": pin_signup_allowed()}
+    if user is None:
+        return {"user": None, "auth": auth}
+    with db.connect() as conn:
+        linked = [r["provider"] for r in conn.all(
+            "SELECT provider FROM identities WHERE user_id = ? ORDER BY provider", (user["id"],))]
+        has_pin = bool(conn.value("SELECT pin_hash FROM users WHERE id = ?", (user["id"],)))
+    return {"user": {**user, "linked": linked, "hasPin": has_pin}, "auth": auth}
+
+
+def rename(user, body):
+    name = str(body.get("name") or "").strip()
+    if not NAME_RE.match(name):
+        raise BadRequest("Names are 2-20 letters, numbers, spaces, dots, dashes or underscores.")
+    try:
+        with db.connect() as conn:
+            conn.run("UPDATE users SET name = ? WHERE id = ?", (name, user["id"]))
+    except Duplicate:
+        raise Conflict("That name is taken.")
+    return {"name": name}
+
+
+# ---------- Google / GitHub sign-in ----------
+
+def _unique_name(conn, wanted):
+    base = re.sub(r"[^A-Za-z0-9 _.-]", "", wanted or "").strip()[:16] or "Player"
+    if len(base) < 2:
+        base = f"{base}Player"[:16]
+    for n in range(0, 1000):
+        name = base if n == 0 else f"{base[:16]}{n + 1}"
+        if not conn.one("SELECT 1 AS x FROM users WHERE lower(name) = lower(?)", (name,)):
+            return name
+    return f"Player{secrets.randbelow(10 ** 6)}"
+
+
+def oauth_start(provider, intent, user):
+    """Make a one-time state and return (provider URL, state). intent is login or link."""
+    if not oauth.is_enabled(provider):
+        raise NotFound("That sign-in option isn't set up.")
+    if intent == "link" and user is None:
+        raise Unauthorized("Sign in first, then link an account.")
+    state = secrets.token_urlsafe(32)
+    with db.connect() as conn:
+        conn.run("DELETE FROM oauth_states WHERE expires < ?", (time.time(),))
+        conn.run("INSERT INTO oauth_states (state, provider, intent, user_id, expires) VALUES (?, ?, ?, ?, ?)",
+                 (state, provider, intent, user["id"] if intent == "link" else None,
+                  time.time() + OAUTH_STATE_SECONDS))
+    return oauth.authorize_url(provider, PUBLIC_URL, state), state
+
+
+def oauth_callback(provider, query, state_cookie):
+    """Finish sign-in. Returns (where to send the browser, new session token or None)."""
+    def fail(message):
+        return "/?" + urlencode({"auth_error": message}), None
+
+    if not oauth.is_enabled(provider):
+        return fail("That sign-in option isn't set up.")
+    if "error" in query:
+        return fail("Sign-in was cancelled.")
+    state, code = query.get("state", [""])[0], query.get("code", [""])[0]
+    if not state or not code or not state_cookie or not hmac.compare_digest(state, state_cookie):
+        return fail("Sign-in expired. Please try again.")
+    with db.connect() as conn:
+        saved = conn.one("SELECT * FROM oauth_states WHERE state = ? AND provider = ? AND expires > ?",
+                         (state, provider, time.time()))
+        conn.run("DELETE FROM oauth_states WHERE state = ?", (state,))
+    if saved is None:
+        return fail("Sign-in expired. Please try again.")
+    try:
+        ident = oauth.fetch_identity(provider, PUBLIC_URL, code)
+    except oauth.OAuthError as e:
+        return fail(str(e))
+
+    label = oauth.PROVIDERS[provider]["label"]
+    imported = 0
+    with db.connect() as conn:
+        owner = conn.value("SELECT user_id FROM identities WHERE provider = ? AND subject = ?",
+                           (provider, ident["subject"]))
+        if saved["intent"] == "link":
+            if owner is not None and owner != saved["user_id"]:
+                return fail(f"That {label} account is already used by another player.")
+            conn.run("INSERT INTO identities (provider, subject, user_id, email, created) VALUES (?, ?, ?, ?, ?) "
+                     "ON CONFLICT DO NOTHING", (provider, ident["subject"], saved["user_id"], ident["email"], _now()))
+            # Linked accounts stop using the PIN, which is much easier to guess.
+            conn.run("UPDATE users SET pin_salt = '', pin_hash = '' WHERE id = ?", (saved["user_id"],))
+            return "/?" + urlencode({"linked": provider}), None
+        if owner is None:
+            owner, imported = _create_user(conn, _unique_name(conn, ident["name"]))
+            conn.run("INSERT INTO identities (provider, subject, user_id, email, created) VALUES (?, ?, ?, ?, ?)",
+                     (provider, ident["subject"], owner, ident["email"], _now()))
+            where = "/?welcome=1"
+        else:
+            where = "/"
+        token = _new_session(conn, owner)
+    _finish_import(imported)
+    return where, token
 
 
 # ---------- NHL data ----------
@@ -365,9 +430,9 @@ def save_pick(user, body):
         raise Conflict("This game has started, so picks are locked.")
 
     winner = body.get("winner")
-    with _db_lock, db() as conn:
+    with db.connect() as conn:
         if not winner:  # clearing a pick
-            conn.execute("DELETE FROM picks WHERE user_id = ? AND game_id = ?", (user["id"], game_id))
+            conn.run("DELETE FROM picks WHERE user_id = ? AND game_id = ?", (user["id"], game_id))
             return None
         if winner not in (game["away"]["abbrev"], game["home"]["abbrev"]):
             raise BadRequest("Pick one of the two teams.")
@@ -380,15 +445,18 @@ def save_pick(user, body):
             predicted = game["home"]["abbrev"] if home > away else game["away"]["abbrev"]
             if predicted != winner:
                 raise BadRequest("That score doesn't match the team you picked.")
-        conn.execute("INSERT OR REPLACE INTO picks VALUES (?, ?, ?, ?, ?, ?)",
+        conn.run("INSERT INTO picks (user_id, game_id, date, winner, away_score, home_score) "
+                 "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (user_id, game_id) DO UPDATE SET "
+                 "date = excluded.date, winner = excluded.winner, "
+                 "away_score = excluded.away_score, home_score = excluded.home_score",
                      (user["id"], game_id, day, winner, away, home))
     return {"date": day, "winner": winner, "awayScore": away, "homeScore": home}
 
 
 def api_games(user, query):
     day = _parse_day(query.get("date", [date_cls.today().isoformat()])[0])
-    with db() as conn:
-        rows = conn.execute("SELECT * FROM picks WHERE user_id = ? AND date = ?", (user["id"], day)).fetchall()
+    with db.connect() as conn:
+        rows = conn.all("SELECT * FROM picks WHERE user_id = ? AND date = ?", (user["id"], day))
     picks = {r["game_id"]: _pick_row(r) for r in rows}
     games = []
     for g in fetch_day(day):
@@ -400,8 +468,8 @@ def api_games(user, query):
 # ---------- player points pick'em ----------
 
 def _slate_rows(day):
-    with db() as conn:
-        return [dict(r) for r in conn.execute("SELECT * FROM slates WHERE date = ? ORDER BY slot", (day,))]
+    with db.connect() as conn:
+        return conn.all("SELECT * FROM slates WHERE date = ? ORDER BY slot", (day,))
 
 
 def build_slate(day):
@@ -450,13 +518,12 @@ def get_slate(day):
     if not today - timedelta(days=1) <= target <= today + timedelta(days=1):
         return []  # only draw near game day, so injuries and call-ups are reflected
     chosen = build_slate(day)
-    with _db_lock, db() as conn:
-        if conn.execute("SELECT 1 FROM slates WHERE date = ?", (day,)).fetchone():
-            return _slate_rows(day)  # another request drew it first
-        conn.executemany(
-            "INSERT INTO slates VALUES (:date, :slot, :player_id, :name, :position, :team, :opponent, "
-            ":game_id, :headshot, :tier, :season_gp, :season_points)",
-            [{**p, "date": day, "slot": i} for i, p in enumerate(chosen)])
+    cols = ("player_id", "name", "position", "team", "opponent", "game_id", "headshot",
+            "tier", "season_gp", "season_points")
+    with db.connect() as conn:  # if two requests race, the first draw wins
+        conn.many(f"INSERT INTO slates (date, slot, {', '.join(cols)}) VALUES ({placeholders(len(cols) + 2)}) "
+                  "ON CONFLICT DO NOTHING",
+                  [(day, i, *(p[c] for c in cols)) for i, p in enumerate(chosen)])
     return _slate_rows(day)
 
 
@@ -490,8 +557,8 @@ def api_players(user, query):
                    else "No player pick'em for this night.")
         return {"date": day, "players": [], "message": message}
     games = {str(g["id"]): g for g in fetch_day(day)}
-    with db() as conn:
-        guesses = {r["player_id"]: r["guess"] for r in conn.execute(
+    with db.connect() as conn:
+        guesses = {r["player_id"]: r["guess"] for r in conn.all(
             "SELECT player_id, guess FROM player_picks WHERE user_id = ? AND date = ?", (user["id"], day))}
     players = []
     for s in slate:
@@ -520,15 +587,16 @@ def save_player_pick(user, body):
     if game is None or is_locked(game):
         raise Conflict("This player's game has started, so the pick is locked.")
     guess = body.get("guess")
-    with _db_lock, db() as conn:
+    with db.connect() as conn:
         if guess is None:
-            conn.execute("DELETE FROM player_picks WHERE user_id = ? AND date = ? AND player_id = ?",
-                         (user["id"], day, player_id))
+            conn.run("DELETE FROM player_picks WHERE user_id = ? AND date = ? AND player_id = ?",
+                     (user["id"], day, player_id))
             return None
         if guess not in PLAYER_GUESSES or isinstance(guess, bool):
             raise BadRequest("Guess 0, 1, 2 or 3+ points.")
-        conn.execute("INSERT OR REPLACE INTO player_picks VALUES (?, ?, ?, ?)",
-                     (user["id"], day, player_id, guess))
+        conn.run("INSERT INTO player_picks (user_id, date, player_id, guess) VALUES (?, ?, ?, ?) "
+                 "ON CONFLICT (user_id, date, player_id) DO UPDATE SET guess = excluded.guess",
+                 (user["id"], day, player_id, guess))
     return guess
 
 
@@ -538,16 +606,27 @@ def _pct(earned, possible):
     return round(100 * earned / possible, 1) if possible else None
 
 
-def leaderboard(user):
+def leaderboard(user, query):
     """Pick % = points earned / points possible, over the nights each player played.
 
     On a night you play, every finished game (and every drawn skater who played) counts,
     so skipping the hard ones doesn't help. Nights you sit out don't count against you.
+    With ?league=<id>, only that league's members are ranked.
     """
-    with db() as conn:
-        users = {r["id"]: r["name"] for r in conn.execute("SELECT id, name FROM users")}
-        picks = conn.execute("SELECT * FROM picks").fetchall()
-        guesses = conn.execute("SELECT * FROM player_picks").fetchall()
+    league_id = _league_id(query.get("league", [None])[0])
+    with db.connect() as conn:
+        if league_id is None:
+            league = None
+            users = {r["id"]: r["name"] for r in conn.all("SELECT id, name FROM users")}
+        else:
+            league = _league_for_member(conn, league_id, user)
+            users = {r["id"]: r["name"] for r in conn.all(
+                "SELECT users.id, users.name FROM league_members JOIN users ON users.id = league_members.user_id "
+                "WHERE league_id = ?", (league_id,))}
+        ids = list(users)
+        where = f"WHERE user_id IN ({placeholders(len(ids))})"
+        picks = conn.all(f"SELECT * FROM picks {where}", ids) if ids else []
+        guesses = conn.all(f"SELECT * FROM player_picks {where}", ids) if ids else []
 
     nights = {}  # (user_id, date) -> tallies
 
@@ -596,7 +675,7 @@ def leaderboard(user):
         t = {k: sum(n[k] for n in own) for k in
              ("gameEarned", "gamePossible", "winners", "exact", "playerEarned", "playerPossible", "playerExact")}
         rows.append({
-            "name": name, "me": uid == user["id"], "nights": len(own),
+            "id": uid, "name": name, "me": uid == user["id"], "nights": len(own),
             "qualified": len(own) >= MIN_NIGHTS,
             "pickPct": _pct(t["gameEarned"] + t["playerEarned"], t["gamePossible"] + t["playerPossible"]),
             "gamePct": _pct(t["gameEarned"], t["gamePossible"]),
@@ -615,7 +694,126 @@ def leaderboard(user):
                 })
 
     rows.sort(key=lambda r: (not r["qualified"], r["pickPct"] is None, -(r["pickPct"] or 0), -r["points"]))
-    return {"minNights": MIN_NIGHTS, "rows": rows, "myNights": mine}
+    return {"minNights": MIN_NIGHTS, "league": league, "rows": rows, "myNights": mine}
+
+
+# ---------- leagues ----------
+
+CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O or 1/I mix-ups
+CODE_LENGTH = 6
+MAX_LEAGUES_PER_USER = 20
+
+
+def _league_id(value):
+    if value in (None, "", "all"):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise BadRequest("Unknown league.")
+
+
+def _league_for_member(conn, league_id, user):
+    league = conn.one(
+        "SELECT leagues.id, leagues.name, leagues.code, leagues.owner_id FROM leagues "
+        "JOIN league_members ON league_members.league_id = leagues.id "
+        "WHERE leagues.id = ? AND league_members.user_id = ?", (league_id, user["id"]))
+    if league is None:
+        raise NotFound("You're not in that league.")
+    return {"id": league["id"], "name": league["name"], "code": league["code"],
+            "isOwner": league["owner_id"] == user["id"]}
+
+
+def my_leagues(user):
+    with db.connect() as conn:
+        leagues = conn.all(
+            "SELECT leagues.id, leagues.name, leagues.code, leagues.owner_id FROM leagues "
+            "JOIN league_members ON league_members.league_id = leagues.id "
+            "WHERE league_members.user_id = ? ORDER BY lower(leagues.name)", (user["id"],))
+        out = []
+        for lg in leagues:
+            members = conn.all(
+                "SELECT users.id, users.name FROM league_members JOIN users ON users.id = league_members.user_id "
+                "WHERE league_id = ? ORDER BY league_members.joined", (lg["id"],))
+            out.append({"id": lg["id"], "name": lg["name"], "code": lg["code"],
+                        "isOwner": lg["owner_id"] == user["id"], "ownerId": lg["owner_id"],
+                        "members": members})
+    return {"leagues": out}
+
+
+def _check_league_limit(conn, user):
+    n = conn.value("SELECT COUNT(*) AS n FROM league_members WHERE user_id = ?", (user["id"],))
+    if n >= MAX_LEAGUES_PER_USER:
+        raise Conflict(f"You can be in at most {MAX_LEAGUES_PER_USER} leagues.")
+
+
+def create_league(user, body):
+    name = str(body.get("name") or "").strip()
+    if not 2 <= len(name) <= 40:
+        raise BadRequest("League names are 2-40 characters.")
+    for _ in range(10):  # retry on the rare invite-code collision
+        code = "".join(secrets.choice(CODE_ALPHABET) for _ in range(CODE_LENGTH))
+        try:
+            with db.connect() as conn:
+                _check_league_limit(conn, user)
+                league_id = conn.value("INSERT INTO leagues (name, code, owner_id, created) VALUES (?, ?, ?, ?) "
+                                       "RETURNING id", (name, code, user["id"], _now()))
+                conn.run("INSERT INTO league_members (league_id, user_id, joined) VALUES (?, ?, ?)",
+                         (league_id, user["id"], _now()))
+            return {"league": {"id": league_id, "name": name, "code": code, "isOwner": True}}
+        except Duplicate:
+            continue
+    raise Conflict("Couldn't make an invite code. Try again.")
+
+
+def join_league(user, body):
+    code = re.sub(r"[^A-Za-z0-9]", "", str(body.get("code") or "")).upper()
+    with db.connect() as conn:
+        league = conn.one("SELECT id, name, code, owner_id FROM leagues WHERE code = ?", (code,))
+        if league is None:
+            raise NotFound("No league has that invite code.")
+        already = conn.one("SELECT 1 AS x FROM league_members WHERE league_id = ? AND user_id = ?",
+                           (league["id"], user["id"]))
+        if not already:
+            _check_league_limit(conn, user)
+            conn.run("INSERT INTO league_members (league_id, user_id, joined) VALUES (?, ?, ?) "
+                     "ON CONFLICT DO NOTHING", (league["id"], user["id"], _now()))
+    return {"league": {"id": league["id"], "name": league["name"], "code": league["code"],
+                       "isOwner": league["owner_id"] == user["id"]}, "alreadyIn": bool(already)}
+
+
+def _remove_member(conn, league_id, user_id):
+    """Take someone out; hand ownership to the longest-standing member, or delete an empty league."""
+    conn.run("DELETE FROM league_members WHERE league_id = ? AND user_id = ?", (league_id, user_id))
+    owner = conn.value("SELECT owner_id FROM leagues WHERE id = ?", (league_id,))
+    if owner != user_id:
+        return
+    heir = conn.value("SELECT user_id FROM league_members WHERE league_id = ? ORDER BY joined LIMIT 1",
+                      (league_id,))
+    if heir is None:
+        conn.run("DELETE FROM leagues WHERE id = ?", (league_id,))
+    else:
+        conn.run("UPDATE leagues SET owner_id = ? WHERE id = ?", (heir, league_id))
+
+
+def leave_league(user, body):
+    league_id = _league_id(body.get("leagueId"))
+    with db.connect() as conn:
+        _league_for_member(conn, league_id, user)
+        _remove_member(conn, league_id, user["id"])
+    return {"ok": True}
+
+
+def remove_member(user, body):
+    league_id = _league_id(body.get("leagueId"))
+    target = body.get("userId")
+    with db.connect() as conn:
+        if not _league_for_member(conn, league_id, user)["isOwner"]:
+            raise Conflict("Only the league owner can remove players.")
+        if target == user["id"]:
+            raise BadRequest("Use Leave to leave your own league.")
+        _remove_member(conn, league_id, target)
+    return {"ok": True}
 
 
 # ---------- HTTP ----------
@@ -627,9 +825,16 @@ class Handler(SimpleHTTPRequestHandler):
     def log_message(self, format, *args):
         pass  # keep the console quiet
 
-    def session_token(self):
+    def cookie(self, name):
         cookie = SimpleCookie(self.headers.get("Cookie") or "")
-        return cookie[SESSION_COOKIE].value if SESSION_COOKIE in cookie else None
+        return cookie[name].value if name in cookie else None
+
+    def session_token(self):
+        return self.cookie(SESSION_COOKIE)
+
+    def _set_cookie(self, name, value, max_age):
+        secure = "; Secure" if SECURE_COOKIES else ""
+        self.send_header("Set-Cookie", f"{name}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}")
 
     def send_json(self, status, payload, cookie=None):
         body = json.dumps(payload).encode("utf-8")
@@ -638,12 +843,38 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         if cookie is not None:
-            token, max_age = cookie
-            secure = "; Secure" if SECURE_COOKIES else ""
-            self.send_header("Set-Cookie", f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; "
-                                           f"Max-Age={max_age}{secure}")
+            self._set_cookie(SESSION_COOKIE, *cookie)
         self.end_headers()
         self.wfile.write(body)
+
+    def send_redirect(self, location, cookies=()):
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        for name, value, max_age in cookies:
+            self._set_cookie(name, value, max_age)
+        self.end_headers()
+
+    def handle_auth(self, url):
+        """GET /auth/<provider>/start?intent=login|link and /auth/<provider>/callback."""
+        parts = url.path.strip("/").split("/")
+        if len(parts) != 3 or parts[2] not in ("start", "callback"):
+            return self.send_json(404, {"error": "Not found."})
+        provider, step, query = parts[1], parts[2], parse_qs(url.query)
+        try:
+            if step == "start":
+                intent = query.get("intent", ["login"])[0]
+                intent = intent if intent in ("login", "link") else "login"
+                location, state = oauth_start(provider, intent, user_for_token(self.session_token()))
+                return self.send_redirect(location, [(STATE_COOKIE, state, OAUTH_STATE_SECONDS)])
+            location, token = oauth_callback(provider, query, self.cookie(STATE_COOKIE))
+        except AppError as e:
+            return self.send_redirect("/?" + urlencode({"auth_error": str(e)}))
+        cookies = [(STATE_COOKIE, "", 0)]
+        if token:
+            cookies.append((SESSION_COOKIE, token, SESSION_DAYS * 86400))
+        self.send_redirect(location, cookies)
 
     def _respond(self, handler):
         try:
@@ -665,14 +896,17 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         url = urlparse(self.path)
+        if url.path.startswith("/auth/"):
+            return self.handle_auth(url)
         if not url.path.startswith("/api/"):
             return super().do_GET()
         query = parse_qs(url.query)
         routes = {
-            "/api/me": lambda: {"user": user_for_token(self.session_token())},
+            "/api/me": lambda: me(self.session_token()),
             "/api/games": self._signed_in(lambda u: api_games(u, query)),
             "/api/players": self._signed_in(lambda u: api_players(u, query)),
-            "/api/leaderboard": self._signed_in(leaderboard),
+            "/api/leaderboard": self._signed_in(lambda u: leaderboard(u, query)),
+            "/api/leagues": self._signed_in(my_leagues),
         }
         route = routes.get(url.path)
         if route is None:
@@ -709,8 +943,13 @@ class Handler(SimpleHTTPRequestHandler):
             "/api/register": signed_in_with_cookie(register),
             "/api/login": signed_in_with_cookie(login),
             "/api/logout": do_logout,
+            "/api/me/name": self._signed_in(lambda u: rename(u, body())),
             "/api/picks": self._signed_in(lambda u: {"pick": save_pick(u, body())}),
             "/api/player-picks": self._signed_in(lambda u: {"guess": save_player_pick(u, body())}),
+            "/api/leagues": self._signed_in(lambda u: create_league(u, body())),
+            "/api/leagues/join": self._signed_in(lambda u: join_league(u, body())),
+            "/api/leagues/leave": self._signed_in(lambda u: leave_league(u, body())),
+            "/api/leagues/remove": self._signed_in(lambda u: remove_member(u, body())),
         }
         route = routes.get(url.path)
         if route is None:
@@ -719,10 +958,12 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 def main():
-    init_db()
+    db.init()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     where = f"http://localhost:{PORT}" if HOST in ("127.0.0.1", "localhost") else f"http://<this computer's IP>:{PORT}"
-    print(f"NHL Picks running at {where}  (Ctrl+C to stop)")
+    print(f"NHL Picks running at {where}  using {db.describe()}  (Ctrl+C to stop)")
+    providers = ", ".join(p["label"] for p in oauth.enabled()) or "none (PIN accounts only)"
+    print(f"Sign-in: {providers}" + (f"  callbacks at {PUBLIC_URL}/auth/<provider>/callback" if oauth.enabled() else ""))
     try:
         server.serve_forever()
     except KeyboardInterrupt:

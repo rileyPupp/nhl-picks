@@ -1,0 +1,8 @@
+# local data: never commit (holds PIN hashes and sign-in tokens)
+*.db
+*.db-journal
+picks.json
+picks.json.imported
+__pycache__/
+.venv/
+.env

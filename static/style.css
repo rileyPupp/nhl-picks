@@ -87,3 +87,34 @@ h2 { font-size: 17px; margin: 24px 0 0; }
 tr.me td { background: color-mix(in srgb, var(--accent) 10%, transparent); }
 tr.unranked td { color: var(--muted); }
 th { white-space: nowrap; }
+
+/* leagues */
+.board-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 12px 0; }
+.board-bar label { display: flex; gap: 6px; align-items: center; font-weight: 600; font-size: 14px; }
+select { font: inherit; padding: 7px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--text); max-width: 60vw; }
+.league-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+.league-form label { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: 14px; font-weight: 600; }
+.league-form input { font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--text); }
+.league-info { margin-bottom: 12px; }
+.league-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.invite { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 14px; }
+.invite code { font-size: 16px; font-weight: 700; letter-spacing: .08em; padding: 2px 6px; border: 1px dashed var(--line); border-radius: 6px; }
+.league-info details { margin-top: 8px; }
+.league-info summary { cursor: pointer; color: var(--muted); }
+.members { margin: 6px 0 0; padding-left: 18px; font-size: 14px; }
+.members li { padding: 2px 0; }
+button.link { border: none; background: none; color: var(--bad); padding: 0 4px; font-size: 13px; }
+
+/* sign-in providers */
+.providers { display: grid; gap: 10px; margin-top: 16px; }
+.provider-btn { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 10px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--text); text-decoration: none; font-weight: 600; }
+.provider-btn:hover { border-color: var(--accent); }
+.pin-box { margin-top: 16px; }
+.pin-box > summary { cursor: pointer; color: var(--muted); font-size: 14px; }
+.pin-box.only > summary { display: none; }
+.pin-box form { margin-top: 10px; }
+#auth > .msg { margin: 16px 0 0; }
+.link-banner { margin-bottom: 12px; border-color: var(--accent); }
+.link-banner p { margin: 0 0 10px; font-size: 14px; }
+.providers-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.link-plain { border: none; background: none; padding: 4px; font-weight: 600; text-decoration: underline dotted; }
