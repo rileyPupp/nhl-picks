@@ -6,3 +6,6 @@ picks.json.imported
 __pycache__/
 .venv/
 .env
+.neon
+node_modules/
+.env.local

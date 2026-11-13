@@ -15,7 +15,9 @@ services:
         value: 0.0.0.0
       - key: SECURE_COOKIES
         value: "1"
-      - key: DATABASE_URL # Postgres connection string, e.g. from Neon
+      - key: DATABASE_URL # Neon pooled connection string (host has -pooler)
+        sync: false
+      - key: DATABASE_URL_UNPOOLED # Neon direct connection string, used to create tables
         sync: false
       - key: PUBLIC_URL # e.g. https://nhl-picks.onrender.com
         sync: false

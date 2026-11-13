@@ -9,7 +9,35 @@ import sqlite3
 from contextlib import contextmanager
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load_env_files():
+    """Read KEY=VALUE lines from .env.local, then .env (written by `neon deploy` / `neon env pull`).
+
+    Real environment variables win, so a host's settings (e.g. on Render) are never overridden.
+    """
+    for name in (".env.local", ".env"):
+        path = os.path.join(BASE_DIR, name)
+        if not os.path.exists(path):
+            continue
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.removeprefix("export ").split("=", 1)
+                key, value = key.strip(), value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+                    value = value[1:-1]
+                os.environ.setdefault(key, value)
+
+
+_load_env_files()
+
+# Neon gives two strings: pooled (DATABASE_URL, for app traffic) and direct
+# (DATABASE_URL_UNPOOLED, for schema changes and bulk copies).
 DATABASE_URL = os.environ.get("DATABASE_URL")
+DIRECT_URL = os.environ.get("DATABASE_URL_UNPOOLED") or DATABASE_URL
 SQLITE_FILE = os.environ.get("NHL_PICKS_DB", os.path.join(BASE_DIR, "nhl-picks.db"))
 IS_POSTGRES = bool(DATABASE_URL)
 
@@ -19,12 +47,20 @@ class Duplicate(Exception):
 
 
 if IS_POSTGRES:
-    import psycopg
-    from psycopg.rows import dict_row
-    from psycopg_pool import ConnectionPool
+    try:
+        import psycopg
+        from psycopg.rows import dict_row
+        from psycopg_pool import ConnectionPool
+    except ImportError:
+        raise SystemExit("DATABASE_URL is set but the Postgres driver isn't installed. "
+                         "Run: pip install -r requirements.txt")
 
-    _pool = ConnectionPool(DATABASE_URL, min_size=1, max_size=10, open=True,
-                           kwargs={"row_factory": dict_row})
+    # prepare_threshold=None: the pooled endpoint (PgBouncer, transaction mode) can hand each
+    # transaction a different server connection, so don't rely on server-side prepared statements.
+    _PG_KWARGS = {"row_factory": dict_row, "prepare_threshold": None}
+    # check_connection: Neon suspends idle computes, which drops pooled connections; test before use.
+    _pool = ConnectionPool(DATABASE_URL, min_size=1, max_size=10, open=True, kwargs=_PG_KWARGS,
+                           check=ConnectionPool.check_connection)
     atexit.register(_pool.close)
     _UNIQUE_ERRORS = (psycopg.errors.UniqueViolation,)
 else:
@@ -66,8 +102,15 @@ class Conn:
 
 
 @contextmanager
-def connect():
-    """One transaction: commits on success, rolls back on error."""
+def connect(direct=False):
+    """One transaction: commits on success, rolls back on error.
+
+    direct=True uses Neon's unpooled connection, for schema setup and bulk copies.
+    """
+    if IS_POSTGRES and direct:
+        with psycopg.connect(DIRECT_URL, **_PG_KWARGS) as raw:
+            yield Conn(raw)
+        return
     if IS_POSTGRES:
         with _pool.connection() as raw:
             yield Conn(raw)
@@ -172,7 +215,7 @@ CREATE TABLE IF NOT EXISTS oauth_states (
 
 
 def init():
-    with connect() as conn:
+    with connect(direct=True) as conn:
         for stmt in SCHEMA.split(";"):
             if stmt.strip():
                 conn.run(stmt)

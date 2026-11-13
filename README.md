@@ -29,13 +29,15 @@ Double-click `start.bat` (or run `python server.py`), then open http://localhost
 ## Put it online (Render + Neon, free)
 The web app runs on [Render](https://render.com), the database on [Neon](https://neon.tech) (Render's own free Postgres is deleted after 30 days; Neon's isn't). Render's free plan sleeps after 15 idle minutes, so the first visit after that takes about a minute.
 
-1. **Database.** Sign up at Neon, create a project, and copy the connection string (`postgresql://...?sslmode=require`).
-2. **Copy your current data** (optional, before anyone signs up on the site):
+1. **Database.** This folder is linked to the Neon project `nhl-picks` (see `.neon` and `neon.ts`). `neon deploy` (or `neon env pull`) writes its connection strings into `.env.local`, which is gitignored. The app reads `.env.local` on start, so locally it now uses Neon instead of the SQLite file — that is the live database. Two strings:
+   - `DATABASE_URL` (pooled, host has `-pooler`): used for the app's queries.
+   - `DATABASE_URL_UNPOOLED` (direct): used for creating tables and for `copy_to_postgres.py`.
+2. **Copy your current data** (optional, once, before anyone signs up on the site):
    ```
    pip install -r requirements.txt
-   $env:DATABASE_URL="<Neon connection string>"; python copy_to_postgres.py
+   python copy_to_postgres.py
    ```
-3. **Web app.** Push this repo to GitHub. On Render: New → Blueprint → pick the repo. It reads `render.yaml` and asks for the secret values; put the Neon string in `DATABASE_URL` and leave the rest blank for now. After it deploys, note the site address (e.g. `https://nhl-picks.onrender.com`) and set `PUBLIC_URL` to it.
+3. **Web app.** Push this repo to GitHub. On Render: New → Blueprint → pick the repo. It reads `render.yaml` and asks for the secret values. Copy `DATABASE_URL` and `DATABASE_URL_UNPOOLED` from `.env.local` (or the Neon console's **Connect** dialog) and leave the rest blank for now. After it deploys, note the site address (e.g. `https://nhl-picks.onrender.com`) and set `PUBLIC_URL` to it.
 4. **Google sign-in.** In [Google Cloud Console](https://console.cloud.google.com/apis/credentials): create a project → OAuth consent screen (External, app name, your email; Publish it so anyone can sign in) → Credentials → Create OAuth client ID → Web application. Authorized redirect URI: `<PUBLIC_URL>/auth/google/callback`. Copy the client ID and secret into Render as `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`.
 5. **GitHub sign-in.** GitHub → Settings → Developer settings → OAuth Apps → New. Homepage: `<PUBLIC_URL>`. Callback URL: `<PUBLIC_URL>/auth/github/callback`. Generate a client secret, then set `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` on Render.
 6. Render redeploys when env vars change. Open the site, sign in with your old PIN, and link Google or GitHub.
@@ -45,7 +47,8 @@ To try Google/GitHub sign-in on your own computer, make a second OAuth app with 
 ### All settings
 | Variable | What it does |
 |---|---|
-| `DATABASE_URL` | Postgres connection string. Unset = local SQLite file. |
+| `DATABASE_URL` | Postgres connection string (pooled on Neon). Unset = local SQLite file. Also read from `.env.local` / `.env`. |
+| `DATABASE_URL_UNPOOLED` | Direct Postgres connection for creating tables and bulk copies. Falls back to `DATABASE_URL`. |
 | `PUBLIC_URL` | The site's address, used for sign-in callbacks. Default `http://localhost:<PORT>`. |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Turn on Google sign-in. |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | Turn on GitHub sign-in. |

@@ -1,19 +1,19 @@
 """Copy the local SQLite data (nhl-picks.db) into an empty hosted Postgres database.
 
     pip install -r requirements.txt
-    $env:DATABASE_URL="postgresql://..."; python copy_to_postgres.py
+    python copy_to_postgres.py
 
-Run it once, before anyone signs up on the website. Sessions are not copied,
-so everyone signs in again on the site.
+It reads DATABASE_URL (and DATABASE_URL_UNPOOLED) from the environment or from
+.env.local, which `neon deploy` writes. Run it once, before anyone signs up on the
+website. Sessions are not copied, so everyone signs in again on the site.
 """
-import os
 import sqlite3
 import sys
 
-if not os.environ.get("DATABASE_URL"):
-    sys.exit("Set DATABASE_URL to the Postgres connection string first.")
+import db  # loads .env.local, picks Postgres when DATABASE_URL is set
 
-import db  # noqa: E402  (uses DATABASE_URL)
+if not db.IS_POSTGRES:
+    sys.exit("Set DATABASE_URL (or run `neon deploy` to write .env.local) first.")
 
 TABLES = ["users", "picks", "slates", "player_picks", "leagues", "league_members", "identities"]
 IDENTITY_TABLES = {"users", "leagues"}  # their ids are copied as-is, then the counters are moved past them
@@ -23,7 +23,7 @@ src.row_factory = sqlite3.Row
 have = {r[0] for r in src.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
 
 db.init()
-with db.connect() as conn:
+with db.connect(direct=True) as conn:
     if conn.value("SELECT COUNT(*) AS n FROM users"):
         sys.exit("The Postgres database already has users. Copy only into an empty database.")
     for table in TABLES:
