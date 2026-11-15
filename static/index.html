@@ -8,7 +8,7 @@
 </head>
 <body>
   <section id="auth" class="auth" hidden>
-    <h1>NHL Picks</h1>
+    <h1>Sports Picks</h1>
     <p class="muted">Pick every winner, call the points, climb the leaderboard.</p>
     <div id="authMsg" class="msg bad" hidden></div>
     <div id="providers" class="card providers" hidden></div>
@@ -28,18 +28,19 @@
 
   <div id="app" hidden>
     <header>
-      <h1>NHL Picks</h1>
+      <div class="title-row"><h1 id="appTitle">NHL Picks</h1>
+        <select id="sportSelect" aria-label="Sport"><option value="nhl">NHL</option><option value="nfl">NFL</option><option value="nba">NBA</option></select></div>
       <div id="totals"></div>
       <div class="who"><button id="whoName" class="link-plain" title="Change your name"></button> <button id="logout">Sign out</button></div>
     </header>
 
     <nav class="tabs" role="tablist">
-      <button role="tab" data-tab="games">Games</button>
-      <button role="tab" data-tab="players">Player points</button>
+      <button role="tab" data-tab="games" data-nhl-only>Games</button>
+      <button role="tab" data-tab="players" data-nhl-only>Player points</button>
       <button role="tab" data-tab="standings">Standings</button>
       <button role="tab" data-tab="teams">Teams</button>
       <button role="tab" data-tab="news">News</button>
-      <button role="tab" data-tab="board">Leaderboard</button>
+      <button role="tab" data-tab="board" data-nhl-only>Leaderboard</button>
     </nav>
 
     <nav class="daybar" id="daybar">
@@ -121,13 +122,15 @@
           <button id="teamBack" class="link-plain">&larr; All teams</button>
           <div id="teamHead" class="card team-head"></div>
           <div id="playerDetail" class="card" hidden></div>
-          <h2>Skaters</h2>
-          <p class="muted small">Regular season. Click a player for their season stats.</p>
-          <div class="table-wrap">
-            <table>
-              <thead><tr><th>Player</th><th>Pos</th><th>GP</th><th>G</th><th>A</th><th>Pts</th><th>+/-</th></tr></thead>
-              <tbody id="skaters"></tbody>
-            </table>
+          <div id="skatersBox">
+            <h2>Skaters</h2>
+            <p class="muted small">Regular season. Click a player for their season stats.</p>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Player</th><th>Pos</th><th>GP</th><th>G</th><th>A</th><th>Pts</th><th>+/-</th></tr></thead>
+                <tbody id="skaters"></tbody>
+              </table>
+            </div>
           </div>
         </div>
       </section>

@@ -9,6 +9,7 @@ Queries use ? placeholders and SQL that both databases accept
 import atexit
 import os
 import sqlite3
+import time
 from contextlib import contextmanager
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -224,25 +225,28 @@ CREATE TABLE IF NOT EXISTS oauth_states (
 );
 CREATE TABLE IF NOT EXISTS standings_orders (
     user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    sport TEXT NOT NULL,
     period_type TEXT NOT NULL,
     period_key TEXT NOT NULL,
     division TEXT NOT NULL,
     team TEXT NOT NULL,
     predicted_rank INTEGER NOT NULL,
-    PRIMARY KEY (user_id, period_type, period_key, team)
+    PRIMARY KEY (user_id, sport, period_type, period_key, team)
 );
-CREATE INDEX IF NOT EXISTS standings_orders_period ON standings_orders (period_type, period_key);
+CREATE INDEX IF NOT EXISTS standings_orders_sport_period ON standings_orders (sport, period_type, period_key);
 CREATE TABLE IF NOT EXISTS standings_results (
+    sport TEXT NOT NULL,
     period_type TEXT NOT NULL,
     period_key TEXT NOT NULL,
     team TEXT NOT NULL,
     division TEXT NOT NULL,
     division_rank INTEGER NOT NULL,
     points INTEGER NOT NULL,
-    PRIMARY KEY (period_type, period_key, team)
+    PRIMARY KEY (sport, period_type, period_key, team)
 );
 CREATE TABLE IF NOT EXISTS news_items (
     link TEXT PRIMARY KEY,
+    sport TEXT NOT NULL DEFAULT 'nhl',
     source TEXT NOT NULL,
     title TEXT NOT NULL,
     summary TEXT NOT NULL,
@@ -250,12 +254,33 @@ CREATE TABLE IF NOT EXISTS news_items (
     teams TEXT NOT NULL,
     fetched TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS news_items_published ON news_items (published);
+CREATE INDEX IF NOT EXISTS news_items_sport ON news_items (sport, published);
 """
+
+
+# Tables whose layout gained a column. An older copy without it is renamed (rows kept) so the new one can be created.
+OUTDATED = {"standings_orders": "sport", "standings_results": "sport", "news_items": "sport"}
+
+
+def _columns(conn, table):
+    if IS_POSTGRES:
+        rows = conn.all("SELECT column_name AS name FROM information_schema.columns WHERE table_name = ?", (table,))
+    else:
+        rows = conn.all(f"PRAGMA table_info({table})")
+    return {r["name"] for r in rows}
+
+
+def _retire_outdated(conn):
+    stamp = int(time.time())
+    for table, column in OUTDATED.items():
+        cols = _columns(conn, table)
+        if cols and column not in cols:
+            conn.run(f"ALTER TABLE {table} RENAME TO {table}_old_{stamp}")
 
 
 def init():
     with connect(direct=True) as conn:
+        _retire_outdated(conn)
         for stmt in SCHEMA.split(";"):
             if stmt.strip():
                 conn.run(stmt)

@@ -1,7 +1,7 @@
 """Copy the local SQLite data (nhl-picks.db) into an empty hosted Postgres database.
 
     pip install -r requirements.txt
-    python copy_to_postgres.py
+    python tools/copy_to_postgres.py
 
 It reads DATABASE_URL (and DATABASE_URL_UNPOOLED) from the environment or from
 .env.local, which `neon deploy` writes. Run it once, before anyone signs up on the
@@ -11,6 +11,7 @@ import os
 import sqlite3
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # the app's modules live one folder up
 os.environ.setdefault("USE_NEON", "1")  # let db read the Neon strings from .env.local
 import db  # noqa: E402  loads .env.local, picks Postgres when DATABASE_URL is set
 

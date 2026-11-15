@@ -46,8 +46,6 @@ button:disabled { opacity: .5; cursor: default; }
 .msg { margin: 0 0 12px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line); font-size: 14px; }
 .msg.good { color: var(--good); }
 .msg.bad { color: var(--bad); }
-.standings { margin-top: 24px; }
-.standings summary { cursor: pointer; font-weight: 600; }
 table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 14px; }
 th, td { padding: 6px; border-bottom: 1px solid var(--line); text-align: left; }
 .muted { color: var(--muted); }
@@ -119,6 +117,21 @@ button.link { border: none; background: none; color: var(--bad); padding: 0 4px;
 .providers-row { display: flex; gap: 8px; flex-wrap: wrap; }
 .link-plain { border: none; background: none; padding: 4px; font-weight: 600; text-decoration: underline dotted; }
 
+.title-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+#sportSelect { font-weight: 700; }
+
+/* each league gets its own accent colour */
+body[data-sport="nhl"] { --accent: #2563eb; }
+body[data-sport="nfl"] { --accent: #0f7b4f; }
+body[data-sport="nba"] { --accent: #c9302c; }
+@media (prefers-color-scheme: dark) {
+  body[data-sport="nhl"] { --accent: #60a5fa; }
+  body[data-sport="nfl"] { --accent: #4ade80; }
+  body[data-sport="nba"] { --accent: #f87171; }
+}
+body[data-sport="nfl"] .tabs button[aria-selected="true"],
+body[data-sport="nba"] .tabs button[aria-selected="true"] { border-bottom-color: var(--accent); }
+
 /* standings picks */
 .period-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; margin: 12px 0 6px; }
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
@@ -154,7 +167,14 @@ body.dragging-order { cursor: grabbing; user-select: none; }
 .everyone summary { cursor: pointer; color: var(--muted); }
 .everyone ul { margin: 6px 0 0; padding-left: 18px; font-size: 14px; }
 #standingsTable h2 { margin-top: 20px; }
+tr.in td { background: color-mix(in srgb, var(--good) 8%, transparent); }
+tr.playoff-line td { border-bottom: 2px dashed var(--muted); text-align: center; font-size: 12px; color: var(--muted); padding: 2px 6px; }
 #teamsGrid h3.sub { font-size: 14px; color: var(--muted); margin: 14px 0 8px; font-weight: 600; }
+/* Teams read top to bottom: one team per row, logo on the left */
+#teamsGrid .grid { grid-template-columns: 1fr; gap: 8px; }
+#teamsGrid .team-card { flex-direction: row; justify-content: flex-start; text-align: left; gap: 14px; padding: 10px 14px; }
+#teamsGrid .team-card img { width: 40px; height: 40px; flex-shrink: 0; }
+#teamsGrid .team-card > span { display: block; }
 
 /* teams, players, news */
 .team-card { display: flex; flex-direction: column; align-items: center; gap: 4px; width: 100%; text-align: center; padding: 14px 10px; cursor: pointer; }

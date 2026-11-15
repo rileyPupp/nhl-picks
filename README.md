@@ -18,6 +18,17 @@ Each night three skaters are drawn, the same three for everyone: one **star**, o
 ## Leagues
 Make a league from the Leaderboard tab and share its invite link (or 6-letter code). The Board picker switches between a league and Everyone. Anyone can leave; the owner can remove players. If the owner leaves, the longest-standing member becomes owner, and an empty league is deleted.
 
+## Standings and picks (NHL, NFL, NBA)
+Use the sport switcher in the header to change between NHL, NFL and NBA. Each sport has its own standings, picks, teams and news.
+
+- **Standings:** division, conference and league tables for the week, month or season, with each team's record and streak.
+- **Picks:** rank every team in a division from first to last. You get 1 point for each team placed exactly right. Picks lock when the period starts, and a finished period is graded against its final standings.
+- **Teams:** sort by name, conference, division or standing. Conference and division sorts show headings. NHL team pages include skater stats.
+- **Playoff odds:** our own estimate from simulating the rest of the season, not a betting line. It assumes each unplayed game is a weighted coin flip. Home ice, injuries and schedule strength are ignored.
+- **News:** headlines from ESPN and CBS Sports, refreshed every 15 minutes and tagged by team.
+
+NHL data comes from the NHL's public API. NFL and NBA data comes from ESPN's public site API. Neither needs a key.
+
 ## Signing in
 - **With Google or GitHub** once their keys are set (see below). New players can only sign up this way.
 - **With a name + PIN** when no Google/GitHub keys are set (local play). Older PIN accounts can still sign in by PIN; the app then asks them to link Google or GitHub, and the PIN stops working once linked. `ALLOW_PIN_SIGNUP=1` keeps PIN sign-up open.
@@ -29,13 +40,13 @@ Double-click `start.bat` (or run `python server.py`), then open http://localhost
 ## Put it online (Render + Neon, free)
 The web app runs on [Render](https://render.com), the database on [Neon](https://neon.tech) (Render's own free Postgres is deleted after 30 days; Neon's isn't). Render's free plan sleeps after 15 idle minutes, so the first visit after that takes about a minute.
 
-1. **Database.** This folder is linked to the Neon project `nhl-picks` (see `.neon` and `neon.ts`). `neon deploy` (or `neon env pull`) writes its connection strings into `.env.local`, which is gitignored. The app reads `.env.local` on start but ignores these two strings unless `USE_NEON=1` is set, so local runs stay on SQLite (`copy_to_postgres.py` sets it for you). Two strings:
+1. **Database.** This folder is linked to the Neon project `nhl-picks` (see `.neon` and `neon.ts`). `neon deploy` (or `neon env pull`) writes its connection strings into `.env.local`, which is gitignored. The app reads `.env.local` on start but ignores these two strings unless `USE_NEON=1` is set, so local runs stay on SQLite (`tools/copy_to_postgres.py` sets it for you). Two strings:
    - `DATABASE_URL` (pooled, host has `-pooler`): used for the app's queries.
-   - `DATABASE_URL_UNPOOLED` (direct): used for creating tables and for `copy_to_postgres.py`.
+   - `DATABASE_URL_UNPOOLED` (direct): used for creating tables and for `tools/copy_to_postgres.py`.
 2. **Copy your current data** (optional, once, before anyone signs up on the site):
    ```
    pip install -r requirements.txt
-   python copy_to_postgres.py
+   python tools/copy_to_postgres.py
    ```
 3. **Web app.** Push this repo to GitHub. On Render: New → Blueprint → pick the repo. It reads `render.yaml` and asks for the secret values. Copy `DATABASE_URL` and `DATABASE_URL_UNPOOLED` from `.env.local` (or the Neon console's **Connect** dialog) and leave the rest blank for now. After it deploys, note the site address (e.g. `https://nhl-picks.onrender.com`) and set `PUBLIC_URL` to it.
 4. **Google sign-in.** In [Google Cloud Console](https://console.cloud.google.com/apis/credentials): create a project → OAuth consent screen (External, app name, your email; Publish it so anyone can sign in) → Credentials → Create OAuth client ID → Web application. Authorized redirect URI: `<PUBLIC_URL>/auth/google/callback`. Copy the client ID and secret into Render as `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`.

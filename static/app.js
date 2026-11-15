@@ -500,6 +500,17 @@ async function loadBoard() {
 const PERIODS = ["week", "month", "season"];
 const GROUPS = ["league", "conference", "division"];
 const DAY_TEXT = { month: "short", day: "numeric", year: "numeric" };
+const SPORTS = ["nhl", "nfl", "nba"];
+const POINTS_LABEL = { nhl: "pts", nfl: "wins", nba: "wins" };
+// "1 pt" / "1 win" for a single point or win, "2 pts" / "2 wins" otherwise.
+// Full record: W-L-OTL for NHL, W-L-T for NFL, W-L for NBA.
+const recordText = (t) => sport === "nhl" ? `${t.w}-${t.l}-${t.otl}`
+  : sport === "nfl" ? `${t.w}-${t.l}-${t.t ?? 0}` : `${t.w}-${t.l}`;
+const pointsText = (n) => {
+  const [one, many] = sport === "nhl" ? ["pt", "pts"] : ["win", "wins"];
+  return `${n} ${n === 1 ? one : many}`;
+};
+let sport = SPORTS.includes(store.get("sport")) ? store.get("sport") : "nhl";
 let standingsPeriod = PERIODS.includes(store.get("standingsPeriod")) ? store.get("standingsPeriod") : "week";
 let standingsView = store.get("standingsView") === "table" ? "table" : "picks";
 let standingsGroup = GROUPS.includes(store.get("standingsGroup")) ? store.get("standingsGroup") : "division";
@@ -614,28 +625,75 @@ function renderScores() {
 function groupedTables() {
   const all = standingsData.divisions.flatMap((d) =>
     d.teams.map((t) => ({ ...t, divisionName: d.name, conferenceName: d.conference })));
-  const row = (t, rank) => `<tr>
+  const nhl = sport === "nhl";
+  const rules = standingsData.playoffRules || { perDivision: 0, wildcards: 0 };
+  const cols = nhl ? 9 : 8;
+  const row = (t, rank, cls) => `<tr class="${cls}">
       <td>${rank}</td><td><span class="tcell">${teamLogo(t)}<span>${esc(t.name)}</span></span></td>
       <td class="small muted">${esc(t.divisionName)}</td><td class="small muted">${esc(t.conferenceName)}</td>
-      <td>${t.gp}</td><td>${t.w}</td><td>${t.l}</td><td>${t.otl}</td><td><b>${t.pts}</b></td><td>${esc(t.streak)}</td>
+      <td>${t.gp}</td><td>${recordText(t)}</td>${nhl ? `<td><b>${t.pts}</b></td>` : ""}<td>${esc(t.streak)}</td>
+      <td>${t.playoffPct == null ? "–" : `<b>${t.playoffPct}%</b>`}</td>
     </tr>`;
-  const table = (teams, rankKey) => `
-    <div class="table-wrap"><table>
-      <thead><tr><th>#</th><th>Team</th><th>Division</th><th>Conference</th><th>GP</th><th>W</th><th>L</th><th>OTL</th><th>Pts</th><th>Streak</th></tr></thead>
-      <tbody>${[...teams].sort((a, b) => a[rankKey] - b[rankKey]).map((t) => row(t, t[rankKey])).join("")}</tbody>
-    </table></div>`;
+
+  // qualSet: the teams in the playoff picture. split: list them above a dashed playoff line.
+  const table = (teams, rankKey, qualSet, split) => {
+    const sorted = [...teams].sort((a, b) => a[rankKey] - b[rankKey]);
+    const ins = sorted.filter((t) => qualSet.has(t.team));
+    const outs = sorted.filter((t) => !qualSet.has(t.team));
+    const body = split
+      ? ins.map((t) => row(t, t[rankKey], "in")).join("")
+        + (ins.length && outs.length ? `<tr class="playoff-line"><td colspan="${cols}">Playoff line</td></tr>` : "")
+        + outs.map((t) => row(t, t[rankKey], "")).join("")
+      : sorted.map((t) => row(t, t[rankKey], qualSet.has(t.team) ? "in" : "")).join("");
+    return `<div class="table-wrap"><table>
+      <thead><tr><th>#</th><th>Team</th><th>Division</th><th>Conference</th><th>GP</th><th>Record</th>${nhl ? "<th>Pts</th>" : ""}<th>Streak</th><th>Playoff %</th></tr></thead>
+      <tbody>${body}</tbody></table></div>`;
+  };
+
+  // Division winners always qualify; wild cards come from the rest of the conference.
+  const playoffTeams = (teams, withWildcards) => {
+    const winners = new Set();
+    const byDivision = {};
+    for (const t of teams) (byDivision[t.division] ||= []).push(t);
+    for (const members of Object.values(byDivision)) {
+      [...members].sort((a, b) => a.divisionRank - b.divisionRank)
+        .slice(0, rules.perDivision).forEach((t) => winners.add(t.team));
+    }
+    const qualified = new Set(winners);
+    if (withWildcards) {
+      teams.filter((t) => !winners.has(t.team))
+        .sort((a, b) => a.conferenceRank - b.conferenceRank)
+        .slice(0, rules.wildcards).forEach((t) => qualified.add(t.team));
+    }
+    return qualified;
+  };
+  const byConference = (teams) => {
+    const groups = {};
+    for (const t of teams) (groups[t.conferenceName] ||= []).push(t);
+    const out = new Set();
+    for (const g of Object.values(groups)) playoffTeams(g, true).forEach((c) => out.add(c));
+    return out;
+  };
+
+  const format = rules.perDivision > 1
+    ? `the top ${rules.perDivision} in each division plus ${rules.wildcards} wild cards per conference`
+    : rules.perDivision === 1
+      ? `the division winners plus ${rules.wildcards} wild cards per conference`
+      : `the top ${rules.wildcards} in each conference`;
+  const note = `<p class="muted small">Playoff line is based on current standings: ${format}. Playoff % is our estimate from simulating the rest of the season, not a betting line.</p>`;
 
   if (standingsGroup === "league") {
-    return `<h2>League</h2>${table(all, "leagueRank")}`;
+    return `${note}<h2>League</h2>${table(all, "leagueRank", byConference(all), false)}`;
   }
   if (standingsGroup === "conference") {
     const conferences = [...new Set(all.map((t) => t.conferenceName))].sort();
-    return conferences.map((c) => {
+    return note + conferences.map((c) => {
       const teams = all.filter((t) => t.conferenceName === c);
-      return `<h2>${esc(c)}</h2>${table(teams, "conferenceRank")}`;
+      return `<h2>${esc(c)}</h2>${table(teams, "conferenceRank", playoffTeams(teams, true), true)}`;
     }).join("");
   }
-  return standingsData.divisions.map((d) => `<h2>${esc(d.name)}</h2>${table(d.teams, "divisionRank")}`).join("");
+  return note + standingsData.divisions.map((d) =>
+    `<h2>${esc(d.name)}</h2>${table(d.teams, "divisionRank", playoffTeams(d.teams, false), true)}`).join("");
 }
 
 function renderView() {
@@ -653,7 +711,7 @@ function renderView() {
 async function loadStandings() {
   $("#standings").innerHTML = `<p class="empty">Loading…</p>`;
   try {
-    const query = `period=${standingsPeriod}${standingsKey ? `&key=${encodeURIComponent(standingsKey)}` : ""}`;
+    const query = `sport=${sport}&period=${standingsPeriod}${standingsKey ? `&key=${encodeURIComponent(standingsKey)}` : ""}`;
     standingsData = await api(`/api/standings?${query}`);
     const p = standingsData.period;
     standingsKey = p.key;
@@ -672,7 +730,7 @@ async function loadStandings() {
 async function saveOrder(division, teams) {
   const p = standingsData.period;
   try {
-    await post("/api/standings-order", { period: p.type, key: p.key, division, teams });
+    await post("/api/standings-order", { sport, period: p.type, key: p.key, division, teams });
     flash(teams.length ? `Saved your ${division} order.` : "Pick cleared.");
   } catch (err) {
     flash(err.message, true);
@@ -772,6 +830,7 @@ $("#periodNext").onclick = () => { standingsKey = standingsData.period.nextKey; 
 // ---------- teams and players ----------
 
 let teamsList = [];
+let teamsSport = null;
 let teamSort = ["name", "conference", "division", "standing"].includes(store.get("teamSort")) ? store.get("teamSort") : "name";
 
 // Sort the team cards. Standing means league-wide rank; division and conference sorts keep standing order inside each group.
@@ -802,7 +861,10 @@ $("#teamSort").onchange = (e) => {
 };
 
 async function ensureTeams() {
-  if (!teamsList.length) teamsList = (await api("/api/teams")).teams;
+  if (teamsSport !== sport || !teamsList.length) {
+    teamsList = (await api(`/api/teams?sport=${sport}`)).teams;
+    teamsSport = sport;
+  }
   return teamsList;
 }
 
@@ -816,22 +878,19 @@ async function loadTeams() {
       <button class="card team-card" data-team-code="${esc(t.team)}">
         ${teamLogo(t)}
         <span class="tc-name">${esc(t.name)}</span>
-        <span class="muted small">${esc(t.divisionName)} · #${t.divisionRank} · ${t.pts} pts</span>
+        <span class="muted small">${esc(t.divisionName)} · ${recordText(t)}${sport === "nhl" ? ` · ${pointsText(t.pts)}` : ""} · #${t.divisionRank}${t.playoffPct == null ? "" : ` · ${t.playoffPct}% playoffs`}</span>
       </button>`;
     // Conference and division sorts get a heading per group; the cards keep their sorted order inside.
     if (teamSort === "conference") {
-      // Conference heading, then a sub-heading and grid for each division in it.
+      // One heading per conference, with its teams underneath.
       const conferences = [];
       for (const t of teams) {
         let c = conferences.find((x) => x.key === t.conferenceName);
-        if (!c) conferences.push((c = { key: t.conferenceName, divisions: [] }));
-        let d = c.divisions.find((x) => x.key === t.divisionName);
-        if (!d) c.divisions.push((d = { key: t.divisionName, teams: [] }));
-        d.teams.push(t);
+        if (!c) conferences.push((c = { key: t.conferenceName, teams: [] }));
+        c.teams.push(t);
       }
       $("#teamsGrid").innerHTML = conferences.map((c) =>
-        `<h2>${esc(c.key)}</h2>` + c.divisions.map((d) =>
-          `<h3 class="sub">${esc(d.key)}</h3><div class="grid">${d.teams.map(card).join("")}</div>`).join("")).join("");
+        `<h2>${esc(c.key)}</h2><div class="grid">${c.teams.map(card).join("")}</div>`).join("");
       return;
     }
     const groupKey = { division: (t) => `${t.divisionName} · ${t.conferenceName}` }[teamSort];
@@ -860,13 +919,15 @@ async function loadTeam(code) {
   $("#teamHead").innerHTML = `<p class="empty">Loading…</p>`;
   $("#skaters").innerHTML = "";
   try {
-    const { team: t, skaters } = await api(`/api/teams/${encodeURIComponent(code)}`);
+    const { team: t, skaters, playersAvailable } = await api(`/api/teams/${encodeURIComponent(code)}?sport=${sport}`);
+    $("#skatersBox").hidden = !playersAvailable;
     $("#teamHead").innerHTML = `
       <div class="pinfo">${teamLogo(t, "logo-lg")}
         <div>
           <div class="pname">${esc(t.name)}</div>
           <div class="muted small">${esc(t.divisionName)} · ${esc(t.conferenceName)} · #${t.divisionRank} in division</div>
-          <div class="small">${t.w}-${t.l}-${t.otl} · <b>${t.pts} pts</b> in ${t.gp} GP · streak ${esc(t.streak)}</div>
+          <div class="small"><b>${recordText(t)}</b>${sport === "nhl" ? ` · <b>${pointsText(t.pts)}</b>` : ""} in ${t.gp} GP · streak ${esc(t.streak)}</div>
+          ${t.playoffPct == null ? "" : `<div class="small" title="Our estimate from simulating the rest of the season">Playoff odds <b>${t.playoffPct}%</b> (estimate)</div>`}
         </div>
       </div>`;
     $("#skaters").innerHTML = skaters.length
@@ -936,7 +997,8 @@ const relTime = (iso) => new Date(iso).toLocaleString(undefined, { month: "short
 async function loadNews() {
   const select = $("#newsTeam");
   try {
-    if (!select.options.length) {
+    if (select.dataset.sport !== sport) {
+      select.dataset.sport = sport;
       const teams = await ensureTeams();
       select.innerHTML = `<option value="">All teams</option>` +
         teams.map((t) => `<option value="${esc(t.team)}">${esc(t.name)}</option>`).join("");
@@ -945,7 +1007,7 @@ async function loadNews() {
   $("#news").innerHTML = `<p class="empty">Loading…</p>`;
   try {
     const team = select.value ? `&team=${encodeURIComponent(select.value)}` : "";
-    const { items } = await api(`/api/news?limit=40${team}`);
+    const { items } = await api(`/api/news?sport=${sport}&limit=40${team}`);
     $("#news").innerHTML = items.length
       ? items.map((n) => `
           <article class="card news-item">
@@ -972,10 +1034,38 @@ function load() {
   if (tab === "standings") loadStandings();
   if (tab === "teams") loadTeams();
   if (tab === "news") loadNews();
-  loadBoard();
+  if (sport === "nhl") loadBoard();
+  else $("#totals").textContent = "";
+}
+
+$("#sportSelect").onchange = (e) => {
+  sport = e.target.value;
+  store.set("sport", sport);
+  standingsKey = null;
+  orderDrafts = {};
+  teamsList = [];
+  $("#newsTeam").innerHTML = "";
+  $("#newsTeam").dataset.sport = "";
+  setTab(tab);
+};
+
+// Games, player points and the leaderboard are NHL-only; other sports show standings, teams and news.
+const NHL_TABS = ["games", "players", "board"];
+
+const SPORT_TITLES = { nhl: "NHL Picks", nfl: "NFL Picks", nba: "NBA Picks" };
+
+function applySport() {
+  $("#sportSelect").value = sport;
+  // The title and colours follow the league; CSS keys off data-sport.
+  document.body.dataset.sport = sport;
+  $("#appTitle").textContent = SPORT_TITLES[sport];
+  document.title = SPORT_TITLES[sport];
+  for (const b of $$("[data-nhl-only]")) b.hidden = sport !== "nhl";
 }
 
 function setTab(t) {
+  applySport();
+  if (sport !== "nhl" && NHL_TABS.includes(t)) t = "standings";
   tab = t;
   for (const b of $$("[data-tab]")) b.setAttribute("aria-selected", String(b.dataset.tab === t));
   for (const p of $$("[data-panel]")) p.hidden = p.dataset.panel !== t;

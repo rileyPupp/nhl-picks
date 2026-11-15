@@ -15,8 +15,11 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import db
+import espn
 import news
+import odds
 import oauth
+import sports
 import standings
 from db import Duplicate, placeholders
 
@@ -376,6 +379,32 @@ def fetch_standings(when):
     path = "/standings/now" if when == "now" else f"/standings/{when}"
     return _cached(("standings", when), lambda: standings.parse_standings(_get_json(path)),
                    done=lambda rows: when != "now" and bool(rows))
+
+
+def fetch_schedule(team):
+    return _cached(("schedule", team), lambda: _get_json(f"/club-schedule-season/{team}/now"),
+                   ttl=SLOW_CACHE_SECONDS)
+
+
+def fetch_playoff_odds(sport="nhl"):
+    """{team: percent} playoff odds from live standings and the remaining schedule. {} if a data source is down."""
+    def load():
+        cfg = sports.get(sport)
+        try:
+            if sport == "nhl":
+                rows = fetch_standings("now")
+                schedules = {r["team"]: fetch_schedule(r["team"]) for r in rows}
+                remaining = odds.nhl_remaining_games(schedules)
+            else:
+                season = sports.current_season_key(sport, date_cls.today())
+                rows = espn.standings_rows(sport, sports.season_year(sport, season), date_cls.today().isoformat())
+                remaining = [(g["away"], g["home"]) for g in
+                             espn.games(sport, sports.season_year(sport, season)) if not g["completed"]]
+        except (OSError, ValueError, KeyError, TypeError, StopIteration):
+            return {}
+        return odds.playoff_odds(rows, remaining, win_points=cfg["winPoints"], ot_point=cfg["otPoint"],
+                                 per_division=cfg["perDivision"], wildcards=cfg["wildcards"])
+    return _cached(("playoff-odds", sport), load, ttl=SLOW_CACHE_SECONDS)
 
 
 def fetch_player(player_id):
@@ -830,9 +859,9 @@ def remove_member(user, body):
     return {"ok": True}
 
 
-# ---------- standings orders ----------
+# ---------- standings, orders, teams and news (every sport) ----------
 
-TEAM_RE = re.compile(r"^[A-Z]{3}$")
+TEAM_RE = re.compile(r"^[A-Z]{2,4}$")
 
 
 def _default(value):
@@ -840,49 +869,78 @@ def _default(value):
     return value.get("default") if isinstance(value, dict) else value
 
 
-def _status(period, key, today):
+def _sport_arg(value):
+    value = (value or "nhl").lower()
+    if value not in sports.SPORTS:
+        raise BadRequest("Sport must be nhl, nfl or nba.")
+    return value
+
+
+def _status(period, key, today, sport):
     if period not in standings.PERIODS:
         raise BadRequest("Period must be week, month or season.")
     try:
-        return standings.describe(period, key or standings.default_key(period, today), today)
+        return standings.describe(period, key or standings.default_key(period, today, sport), today, sport)
     except standings.PeriodError as e:
         raise BadRequest(str(e))
 
 
-def _final_ranks(status):
+def season_for_status(sport, status):
+    """The season a period belongs to. Season periods carry their own key; weeks and months use their start date."""
+    if status["type"] == "season":
+        return status["key"]
+    return sports.current_season_key(sport, date_cls.fromisoformat(status["start"]))
+
+
+def current_season(sport):
+    return sports.current_season_key(sport, date_cls.today())
+
+
+def standings_rows(sport, season_key, when):
+    """Team standings for a sport at 'now' or a YYYY-MM-DD date. NHL uses the NHL API; NFL and NBA use ESPN."""
+    if sport == "nhl":
+        return fetch_standings(when)
+    as_of = date_cls.today().isoformat() if when == "now" else when
+    return espn.standings_rows(sport, sports.season_year(sport, season_key), as_of)
+
+
+def _final_ranks(sport, status):
     """{team: {division, division_rank, points}} from the period's last-day standings.
 
-    Stored the first time anyone asks after the period ends, so later NHL data can't change grades.
+    Stored the first time anyone asks after the period ends, so later data can't change grades.
     """
     with db.connect() as conn:
         rows = conn.all("SELECT team, division, division_rank, points FROM standings_results "
-                        "WHERE period_type = ? AND period_key = ?", (status["type"], status["key"]))
+                        "WHERE sport = ? AND period_type = ? AND period_key = ?",
+                        (sport, status["type"], status["key"]))
     if not rows:
-        snapshot = fetch_standings(status["end"])
+        snapshot = standings_rows(sport, season_for_status(sport, status), status["end"])
         if not snapshot:
             return {}
         rows = [{"team": t["team"], "division": t["division"], "division_rank": t["divisionRank"],
                  "points": t["pts"]} for t in snapshot]
         with db.connect() as conn:
-            conn.many("INSERT INTO standings_results (period_type, period_key, team, division, division_rank, points) "
-                      "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
-                      [(status["type"], status["key"], r["team"], r["division"], r["division_rank"], r["points"])
+            conn.many("INSERT INTO standings_results (sport, period_type, period_key, team, division, division_rank, points) "
+                      "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                      [(sport, status["type"], status["key"], r["team"], r["division"], r["division_rank"], r["points"])
                        for r in rows])
     return {r["team"]: r for r in rows}
 
 
 def api_standings(user, query):
+    sport = _sport_arg(query.get("sport", ["nhl"])[0])
     today = date_cls.today()
     period = query.get("period", ["week"])[0]
-    status = _status(period, query.get("key", [None])[0], today)
-    final = _final_ranks(status) if status["final"] else {}
+    status = _status(period, query.get("key", [None])[0], today, sport)
+    final = _final_ranks(sport, status) if status["final"] else {}
     ranks = {team: r["division_rank"] for team, r in final.items()}
-    divisions = standings.group_divisions(fetch_standings(standings.snapshot_date(status)))
+    divisions = standings.group_divisions(standings_rows(sport, season_for_status(sport, status),
+                                                         standings.snapshot_date(status)))
 
     with db.connect() as conn:
         rows = conn.all("SELECT o.user_id, u.name, o.division, o.team, o.predicted_rank FROM standings_orders o "
-                        "JOIN users u ON u.id = o.user_id WHERE o.period_type = ? AND o.period_key = ?",
-                        (period, status["key"]))
+                        "JOIN users u ON u.id = o.user_id WHERE o.sport = ? AND o.period_type = ? AND o.period_key = ?",
+                        (sport, period, status["key"]))
     by_user = {}  # user_id -> {"name", "orders": {division: {team: rank}}}
     for r in rows:
         entry = by_user.setdefault(r["user_id"], {"name": r["name"], "orders": {}})
@@ -906,16 +964,23 @@ def api_standings(user, query):
         for entry in by_user.values():
             points = sum(standings.score_order(order, ranks) for order in entry["orders"].values())
             placed = sum(len(order) for order in entry["orders"].values())
-            scores.append({"name": entry["name"], "points": points, "placed": placed,
-                           "possible": placed})
+            scores.append({"name": entry["name"], "points": points, "placed": placed, "possible": placed})
         scores.sort(key=lambda s: (-s["points"], s["name"].lower()))
 
+    # Playoff odds describe the live season, so they're left off a period that has already been graded.
+    live = {} if status["final"] else fetch_playoff_odds(sport)
     for div in divisions:
+        for t in div["teams"]:
+            t["playoffPct"] = live.get(t["team"])
         div["mine"] = ordered(mine[div["abbrev"]]) if div["abbrev"] in mine else None
         div["picks"] = sorted(picks.get(div["abbrev"], []), key=lambda p: p["name"].lower())
     return {
-        "period": {**status, "prevKey": standings.prev_key(period, status["key"]),
-                   "nextKey": standings.next_key(period, status["key"])},
+        "sport": sport,
+        "pointsLabel": sports.get(sport)["pointsLabel"],
+        "playoffRules": {"perDivision": sports.get(sport)["perDivision"],
+                         "wildcards": sports.get(sport)["wildcards"]},
+        "period": {**status, "prevKey": standings.prev_key(period, status["key"], sport),
+                   "nextKey": standings.next_key(period, status["key"], sport)},
         "asOf": standings.snapshot_date(status),
         "final": final and True or False,
         "divisions": divisions,
@@ -925,11 +990,13 @@ def api_standings(user, query):
 
 def save_standings_order(user, body):
     today = date_cls.today()
-    status = _status(body.get("period"), body.get("key"), today)
+    sport = _sport_arg(body.get("sport"))
+    status = _status(body.get("period"), body.get("key"), today, sport)
     if status["locked"]:
         raise Conflict("This period has started, so its picks are locked.")
     division = body.get("division")
-    members = {t["team"] for t in fetch_standings("now") if t["division"] == division}
+    members = {t["team"] for t in standings_rows(sport, season_for_status(sport, status), "now")
+               if t["division"] == division}
     if not members:
         raise BadRequest("Pick a division from the standings.")
     order = body.get("teams") or []  # an empty list clears the pick
@@ -938,28 +1005,35 @@ def save_standings_order(user, body):
     if order and (len(order) != len(members) or set(order) != members):
         raise BadRequest(f"Rank all {len(members)} teams in that division, each once.")
     with db.connect() as conn:
-        conn.run("DELETE FROM standings_orders WHERE user_id = ? AND period_type = ? "
+        conn.run("DELETE FROM standings_orders WHERE user_id = ? AND sport = ? AND period_type = ? "
                  "AND period_key = ? AND division = ?",
-                 (user["id"], status["type"], status["key"], division))
+                 (user["id"], sport, status["type"], status["key"], division))
         if order:
-            conn.many("INSERT INTO standings_orders (user_id, period_type, period_key, division, team, predicted_rank) "
-                      "VALUES (?, ?, ?, ?, ?, ?)",
-                      [(user["id"], status["type"], status["key"], division, t, i + 1)
+            conn.many("INSERT INTO standings_orders (user_id, sport, period_type, period_key, division, team, predicted_rank) "
+                      "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                      [(user["id"], sport, status["type"], status["key"], division, t, i + 1)
                        for i, t in enumerate(order)])
     return {"period": status["type"], "key": status["key"], "division": division, "teams": order}
 
 
-# ---------- teams, players, news ----------
+def api_teams(user, query):
+    sport = _sport_arg(query.get("sport", ["nhl"])[0])
+    live = fetch_playoff_odds(sport)
+    rows = [{**t, "playoffPct": live.get(t["team"])} for t in standings_rows(sport, current_season(sport), "now")]
+    return {"sport": sport, "pointsLabel": sports.get(sport)["pointsLabel"],
+            "teams": sorted(rows, key=lambda t: t["name"])}
 
-def api_teams(user):
-    return {"teams": sorted(fetch_standings("now"), key=lambda t: t["name"])}
 
-
-def api_team(user, code):
+def api_team(user, code, query):
+    sport = _sport_arg(query.get("sport", ["nhl"])[0])
     code = (code or "").upper()
-    row = next((t for t in fetch_standings("now") if t["team"] == code), None) if TEAM_RE.match(code) else None
+    rows = standings_rows(sport, current_season(sport), "now")
+    row = next((t for t in rows if t["team"] == code), None) if TEAM_RE.match(code) else None
     if row is None:
         raise NotFound("No team with that code.")
+    row = {**row, "playoffPct": fetch_playoff_odds(sport).get(code)}
+    if sport != "nhl":  # player stats are NHL-only for now
+        return {"team": row, "skaters": [], "playersAvailable": False}
     skaters = []
     for s in fetch_team_skaters(code):
         skaters.append({
@@ -970,7 +1044,7 @@ def api_team(user, code):
             "headshot": s.get("headshot"),
         })
     skaters.sort(key=lambda s: (-s["points"], s["name"]))
-    return {"team": row, "skaters": skaters}
+    return {"team": row, "skaters": skaters, "playersAvailable": True}
 
 
 def api_player(user, player_id):
@@ -1001,14 +1075,15 @@ def api_player(user, player_id):
 
 
 def api_news(user, query):
+    sport = _sport_arg(query.get("sport", ["nhl"])[0])
     team = (query.get("team", [""])[0] or "").upper() or None
     if team and not TEAM_RE.match(team):
-        raise BadRequest("Team must be a 3-letter code.")
+        raise BadRequest("Team must be a team code.")
     try:
         limit = min(max(int(query.get("limit", ["40"])[0]), 1), 100)
     except ValueError:
         raise BadRequest("Limit must be a number.")
-    return {"items": news.list_items(team, limit)}
+    return {"items": news.list_items(sport, team, limit)}
 
 
 # ---------- HTTP ----------
@@ -1116,12 +1191,12 @@ class Handler(SimpleHTTPRequestHandler):
             "/api/leaderboard": self._signed_in(lambda u: leaderboard(u, query)),
             "/api/leagues": self._signed_in(my_leagues),
             "/api/standings": self._signed_in(lambda u: api_standings(u, query)),
-            "/api/teams": self._signed_in(api_teams),
+            "/api/teams": self._signed_in(lambda u: api_teams(u, query)),
             "/api/news": self._signed_in(lambda u: api_news(u, query)),
         }
         if url.path.startswith("/api/teams/"):
             code = url.path.removeprefix("/api/teams/")
-            return self._respond(self._signed_in(lambda u: api_team(u, code)))
+            return self._respond(self._signed_in(lambda u: api_team(u, code, query)))
         if url.path.startswith("/api/players/"):
             player_id = url.path.removeprefix("/api/players/")
             return self._respond(self._signed_in(lambda u: api_player(u, player_id)))
@@ -1178,6 +1253,9 @@ class Handler(SimpleHTTPRequestHandler):
 def main():
     db.init()
     news.start_background_refresh()
+    # Warm the playoff-odds cache so the first visitor doesn't wait on 32 schedule fetches.
+    threading.Thread(target=lambda: [fetch_playoff_odds(s) for s in sports.SPORTS], daemon=True,
+                     name="odds-warmup").start()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     where = f"http://localhost:{PORT}" if HOST in ("127.0.0.1", "localhost") else f"http://<this computer's IP>:{PORT}"
     print(f"NHL Picks running at {where}  using {db.describe()}  (Ctrl+C to stop)")
